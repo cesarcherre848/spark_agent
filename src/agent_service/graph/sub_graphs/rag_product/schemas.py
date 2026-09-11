@@ -17,3 +17,4 @@ class FinalAnswer(BaseModel):
     response_text: str = Field(
         description="Respuesta técnica y comercial explicando la selección."
     )
+
