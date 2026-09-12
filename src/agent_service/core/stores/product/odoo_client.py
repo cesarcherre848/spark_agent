@@ -171,11 +171,19 @@ class OdooClient:
                 categ_raw = rec.get("categ_id")
                 category_val = categ_raw[1] if isinstance(categ_raw, (list, tuple)) and len(categ_raw) > 1 else None
 
-            # Campos directos
-            desc_val = rec.get("description_sale") if "description" in requested_attrs else None
-            uom_val = rec.get("uom_name") if "uom" in requested_attrs else None
-            barcode_val = rec.get("barcode") if "barcode" in requested_attrs else None
-            taxes_val = rec.get("tax_string") if "taxes" in requested_attrs else None
+            # Campos directos (en Odoo los campos vacíos vienen como False en lugar de None)
+            desc_raw = rec.get("description_sale")
+            desc_val = str(desc_raw) if ("description" in requested_attrs and desc_raw) else None
+
+            uom_raw = rec.get("uom_name")
+            uom_val = str(uom_raw) if ("uom" in requested_attrs and uom_raw) else None
+
+            barcode_raw = rec.get("barcode")
+            barcode_val = str(barcode_raw) if ("barcode" in requested_attrs and barcode_raw) else None
+
+            taxes_raw = rec.get("tax_string")
+            taxes_val = str(taxes_raw) if ("taxes" in requested_attrs and taxes_raw) else None
+
 
             products.append(
                 ProductOdooDetail(

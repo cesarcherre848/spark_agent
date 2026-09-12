@@ -13,6 +13,7 @@ from src.agent_service.graph.sub_graphs.product_rag.schemas import (
     format_candidates_for_prompt,
 )
 from src.agent_service.graph.sub_graphs.product_rag.state import ProductRagState
+from src.agent_service.core.llms import bind_temperature
 
 
 class ProductRagNodes:
@@ -28,10 +29,13 @@ class ProductRagNodes:
         self._top_k = top_k
         self._default_max_iterations = default_max_iterations
 
-        self._normalizer = llm.with_structured_output(NormalizedQuery)
-        self._judge = llm.with_structured_output(EvaluationResult)
-        self._refiner = llm.with_structured_output(QueryRefinementResult)
-        self._synthesizer = llm.with_structured_output(FinalAnswer)
+        # Temperaturas por llamada: normalización y evaluación estrictas (0.0),
+        # reformulación reflexiva creativa (0.5) y síntesis comercial balanceada (0.35).
+        self._normalizer = bind_temperature(llm, 0.15).with_structured_output(NormalizedQuery)
+        self._judge = bind_temperature(llm, 0.1).with_structured_output(EvaluationResult)
+        self._refiner = bind_temperature(llm, 0.5).with_structured_output(QueryRefinementResult)
+        self._synthesizer = bind_temperature(llm, 0.35).with_structured_output(FinalAnswer)
+
 
     async def normalize_query(self, state: ProductRagState) -> dict:
         raw_query = state.get("raw_query", "").strip()

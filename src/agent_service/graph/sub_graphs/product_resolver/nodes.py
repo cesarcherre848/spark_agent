@@ -20,6 +20,8 @@ from src.agent_service.tools.product_tools import (
     validate_product_ownership,
 )
 
+from src.agent_service.core.llms import bind_temperature
+
 logger = logging.getLogger(__name__)
 
 
@@ -42,8 +44,10 @@ class ProductResolverNodes:
         self._supplier_tool = supplier_tool
         self._partner_resolver = partner_resolver
 
-        self._extractor = llm.with_structured_output(ExtractionResult)
-        self._synthesizer = llm.with_structured_output(SynthesizeResponse)
+        # Extracción estricta sin alucinación (temp 0.0) y síntesis comercial balanceada (temp 0.35)
+        self._extractor = bind_temperature(llm, 0.0).with_structured_output(ExtractionResult)
+        self._synthesizer = bind_temperature(llm, 0.35).with_structured_output(SynthesizeResponse)
+
 
     async def extract_skus_and_attributes(self, state: ProductResolverState) -> dict:
         """Nodo 1: Extrae SKUs, cantidades, atributos y partners desde la entrada del usuario."""
