@@ -18,6 +18,8 @@ _HYBRID_QUERY_SQL = """
          AND vuap.user_id = %(user_id)s
         WHERE emb.active = TRUE
           AND (%(user_id)s IS NULL OR vuap.user_id IS NOT NULL)
+          AND emb.ai_provider = %(ai_provider)s
+          AND emb.ai_model = %(ai_model)s
         ORDER BY emb.{embedding_column} <=> %(query_embedding)s::vector
         LIMIT %(k_candidates)s
     ),
@@ -36,6 +38,8 @@ _HYBRID_QUERY_SQL = """
          AND vuap.user_id = %(user_id)s
         WHERE emb.active = TRUE
           AND (%(user_id)s IS NULL OR vuap.user_id IS NOT NULL)
+          AND emb.ai_provider = %(ai_provider)s
+          AND emb.ai_model = %(ai_model)s
           AND to_tsvector('spanish', COALESCE(emb.name, '') || ' ' || COALESCE(emb.source_text, '')) 
               @@ websearch_to_tsquery('spanish', %(query_text)s)
         LIMIT %(k_candidates)s
@@ -59,7 +63,9 @@ _HYBRID_QUERY_SQL = """
          AND vuap.user_id = %(user_id)s
         LEFT JOIN semantic_search sem ON sem.id = emb.id
         LEFT JOIN lexical_search lex ON lex.id = emb.id
-        WHERE sem.id IS NOT NULL OR lex.id IS NOT NULL
+        WHERE (sem.id IS NOT NULL OR lex.id IS NOT NULL)
+          AND emb.ai_provider = %(ai_provider)s
+          AND emb.ai_model = %(ai_model)s
         ORDER BY emb.id
     )
     SELECT 
@@ -82,17 +88,21 @@ class ProductVectorStore(VectorStore):
         self,
         pool: AsyncConnectionPool,
         embedding_service: Embeddings,
-        table_name: str = "product_catalog",
-        embedding_column: str = "embedding_1536",
+        table_name: str = "product_vector_embedding",
+        embedding_column: str = "embedding_1024",
+        ai_provider: Optional[str] = "huggingface",
+        ai_model: Optional[str] = "BAAI/bge-m3",
     ):
         self._pool = pool
         self._embedding_service = embedding_service
         self._table_name = table_name
         self._embedding_column = embedding_column
+        self._ai_provider = ai_provider
+        self._ai_model = ai_model
 
         # Extraer dimensión de la columna (ej. '1536' de 'embedding_1536')
         dim_str = "".join(filter(str.isdigit, embedding_column))
-        self._embedding_dim = int(dim_str) if dim_str else 1536
+        self._embedding_dim = int(dim_str) if dim_str else 1024
 
         # Compilación segura usando la plantilla definida
         self._compiled_query = _HYBRID_QUERY_SQL.format(
@@ -107,9 +117,12 @@ class ProductVectorStore(VectorStore):
         alpha: float = 0.7,
         filters: Optional[ProductCatalogFilter] = None,
     ) -> List[Document]:
+        # Normalizar consulta a minúsculas y espacios limpios para evitar fragmentación de sub-tokens
+        clean_query = " ".join((query or "").lower().split())
+
         # Generar embedding o crear vector dummy con dimensión exacta si alpha == 0.0
         if alpha > 0.0:
-            query_embedding = await self._embedding_service.aembed_query(query)
+            query_embedding = await self._embedding_service.aembed_query(clean_query)
             embedding_str = f"[{','.join(map(str, query_embedding))}]"
         else:
             embedding_str = f"[{','.join(['0.0'] * self._embedding_dim)}]"
@@ -118,11 +131,13 @@ class ProductVectorStore(VectorStore):
 
         params: Dict[str, Any] = {
             "query_embedding": embedding_str,
-            "query_text": query,
+            "query_text": clean_query,
             "user_id": target_user_id,
             "alpha": alpha,
             "k_candidates": max(k * 4, 20),
             "k": k,
+            "ai_provider": self._ai_provider,
+            "ai_model": self._ai_model,
         }
 
         async with self._pool.connection() as conn:
