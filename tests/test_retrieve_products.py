@@ -5,7 +5,7 @@ from langchain_core.language_models.chat_models import BaseChatModel
 
 from src.agent_service.core.stores.product.vector_store import ProductVectorStore
 from src.agent_service.core.stores.product.schemas import ProductCatalogFilter
-from src.agent_service.graph.sub_graphs.rag_product.nodes import ProductRagNodes
+from src.agent_service.graph.sub_graphs.product_rag.nodes import ProductRagNodes
 
 
 @pytest.fixture

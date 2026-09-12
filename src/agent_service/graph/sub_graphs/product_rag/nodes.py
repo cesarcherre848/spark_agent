@@ -5,14 +5,14 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from src.agent_service.core.stores.product.vector_store import ProductVectorStore
 from src.agent_service.core.stores.product.schemas import ProductCatalogFilter
-from src.agent_service.graph.sub_graphs.rag_product.schemas import (
+from src.agent_service.graph.sub_graphs.product_rag.schemas import (
     NormalizedQuery,
     EvaluationResult,
     QueryRefinementResult,
     FinalAnswer,
     format_candidates_for_prompt,
 )
-from src.agent_service.graph.sub_graphs.rag_product.state import ProductRagState
+from src.agent_service.graph.sub_graphs.product_rag.state import ProductRagState
 
 
 class ProductRagNodes:

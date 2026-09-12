@@ -3,8 +3,8 @@ from langgraph.graph import StateGraph, START, END
 from langchain_core.language_models.chat_models import BaseChatModel
 
 from src.agent_service.core.stores.product.vector_store import ProductVectorStore
-from src.agent_service.graph.sub_graphs.rag_product.state import ProductRagState
-from src.agent_service.graph.sub_graphs.rag_product.nodes import ProductRagNodes
+from src.agent_service.graph.sub_graphs.product_rag.state import ProductRagState
+from src.agent_service.graph.sub_graphs.product_rag.nodes import ProductRagNodes
 
 
 def _route_after_judge(state: ProductRagState) -> Literal["synthesize", "reflection_refined"]:

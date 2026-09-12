@@ -4,8 +4,8 @@ from langchain_core.documents import Document
 from langchain_core.language_models.chat_models import BaseChatModel
 
 from src.agent_service.core.stores.product.vector_store import ProductVectorStore
-from src.agent_service.graph.sub_graphs.rag_product.graph import build_rag_product_graph
-from src.agent_service.graph.sub_graphs.rag_product.schemas import (
+from src.agent_service.graph.sub_graphs.product_rag.graph import build_rag_product_graph
+from src.agent_service.graph.sub_graphs.product_rag.schemas import (
     NormalizedQuery,
     EvaluationResult,
     QueryRefinementResult,

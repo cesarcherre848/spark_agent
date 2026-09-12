@@ -6,6 +6,8 @@ from src.agent_service.core.stores.product.schemas import (
     ProductAttribute,
     ProductOdooDetail,
     GetProductBySkusOutput,
+    SupplierInfo,
+    SupplierSearchOutput,
 )
 
 logger = logging.getLogger(__name__)
@@ -195,6 +197,69 @@ class OdooClient:
 
         return GetProductBySkusOutput(products=products, not_found_skus=not_found_skus)
 
+    async def search_suppliers(
+        self,
+        query: str,
+        limit: int = 5,
+    ) -> SupplierSearchOutput:
+        """Busca proveedores en Odoo ERP por nombre comercial, razón social o RUC (res.partner)."""
+        clean_query = (query or "").strip()
+        if not clean_query:
+            return SupplierSearchOutput(suppliers=[], query="")
+
+        if not self._uid:
+            await self.authenticate()
+
+        # Dominio: busca por nombre o vat (RUC) donde sea proveedor (supplier_rank > 0)
+        domain = [
+            ["supplier_rank", ">", 0],
+            "|",
+            ["name", "ilike", clean_query],
+            ["vat", "ilike", clean_query],
+        ]
+
+        call_payload = {
+            "jsonrpc": "2.0",
+            "method": "call",
+            "params": {
+                "model": "res.partner",
+                "method": "search_read",
+                "args": [domain],
+                "kwargs": {
+                    "fields": ["id", "name", "display_name", "vat"],
+                    "limit": limit,
+                },
+            },
+            "id": 2,
+        }
+
+        try:
+            response = await self._client.post("/web/dataset/call_kw", json=call_payload)
+            response.raise_for_status()
+            data = response.json()
+        except Exception as e:
+            logger.error(f"Error de red al consultar proveedores en Odoo: {e}")
+            raise ConnectionError(f"Error al conectar con Odoo API: {e}") from e
+
+        if "error" in data:
+            err_msg = data["error"].get("data", {}).get("message") or data["error"].get("message")
+            logger.error(f"Error devuelto por Odoo al buscar proveedores: {err_msg}")
+            raise RuntimeError(f"Error en Odoo API (search_suppliers): {err_msg}")
+
+        records: List[Dict[str, Any]] = data.get("result", []) or []
+        suppliers: List[SupplierInfo] = []
+        for rec in records:
+            suppliers.append(
+                SupplierInfo(
+                    id=rec["id"],
+                    name=rec.get("name") or "",
+                    display_name=rec.get("display_name") or rec.get("name") or "",
+                    vat=rec.get("vat") if rec.get("vat") else None,
+                )
+            )
+
+        return SupplierSearchOutput(suppliers=suppliers, query=clean_query)
+
     async def aclose(self):
         """Cierra el cliente HTTP si fue creado internamente."""
         if self._owns_client and self._client:
@@ -205,3 +270,4 @@ class OdooClient:
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.aclose()
+
