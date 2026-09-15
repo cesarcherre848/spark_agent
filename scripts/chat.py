@@ -38,7 +38,9 @@ from src.agent_service.config.llm import get_llm_settings
 from src.agent_service.config.database import get_db_pool, close_db_pool
 from src.agent_service.config.odoo import get_odoo_settings
 from src.agent_service.core.llms.factory import get_default_llm
-from src.agent_service.graph.sub_graphs.product_resolver.graph import build_product_resolver_graph
+from src.agent_service.core.embeddings.factory import get_embedding_service
+from src.agent_service.graph.sub_graphs.user_memory import UserMemoryStore, get_postgres_checkpointer
+from src.agent_service.graph.main_graph import build_main_graph
 
 
 # --- Colores ANSI para terminal ---
@@ -58,7 +60,7 @@ class Colors:
 def print_banner(model_name: str, provider: str, user_id: int, thread_id: str, debug: bool):
     """Imprime el banner inicial de la sesión de chat."""
     print(f"\n{Colors.CYAN}{Colors.BOLD}{'=' * 68}{Colors.RESET}")
-    print(f"{Colors.CYAN}{Colors.BOLD}   🤖 SPARK AGENT - CHAT INTERACTIVO (Product Resolver & ERP)   {Colors.RESET}")
+    print(f"{Colors.CYAN}{Colors.BOLD}   🤖 SPARK AGENT - CHAT UNIFICADO (General, RAG & Resolver)    {Colors.RESET}")
     print(f"{Colors.CYAN}{Colors.BOLD}{'=' * 68}{Colors.RESET}")
     print(f" {Colors.BOLD}Proveedor LLM:{Colors.RESET} {Colors.GREEN}{provider.upper()}{Colors.RESET} | {Colors.BOLD}Modelo:{Colors.RESET} {Colors.GREEN}{model_name}{Colors.RESET}")
     print(f" {Colors.BOLD}Usuario ID:{Colors.RESET}    {Colors.YELLOW}{user_id}{Colors.RESET} (simulado para permisos de catálogo)")
@@ -69,6 +71,7 @@ def print_banner(model_name: str, provider: str, user_id: int, thread_id: str, d
     print(f"   {Colors.BOLD}/help{Colors.RESET}       - Ver ayuda y ejemplos de consultas")
     print(f"   {Colors.BOLD}/new{Colors.RESET}        - Iniciar un nuevo hilo de conversación")
     print(f"   {Colors.BOLD}/user <id>{Colors.RESET}  - Cambiar el ID de usuario activo (ej: /user 5)")
+    print(f"   {Colors.BOLD}/memory{Colors.RESET}     - Ver historial de memorias persistidas del usuario")
     print(f"   {Colors.BOLD}/debug{Colors.RESET}      - Alternar modo de depuración detallado")
     print(f"   {Colors.BOLD}/exit{Colors.RESET}       - Salir del chat (o escribe 'salir')")
     print(f"{Colors.CYAN}{'=' * 68}{Colors.RESET}\n")
@@ -76,20 +79,21 @@ def print_banner(model_name: str, provider: str, user_id: int, thread_id: str, d
 
 def print_help():
     """Muestra la guía de uso y ejemplos prácticos."""
-    print(f"\n{Colors.YELLOW}{Colors.BOLD}📖 GUÍA DE USO Y EJEMPLOS:{Colors.RESET}")
-    print(f"  El agente está conectado a Google Gemini, PostgreSQL (catálogo autorizado) y Odoo ERP.")
-    print(f"\n  {Colors.BOLD}1. Cotización directa con SKU:{Colors.RESET}")
+    print(f"\n{Colors.YELLOW}{Colors.BOLD}📖 GUÍA DE USO Y EJEMPLOS DE SPARK AGENT:{Colors.RESET}")
+    print(f"  El agente integra Router inteligente, Memoria semántica (pgvector), RAG y Odoo ERP.")
+    print(f"\n  {Colors.BOLD}1. Charla general y orientación (General Chat):{Colors.RESET}")
+    print(f"     > {Colors.CYAN}¡Hola! ¿En qué puedes ayudarme?{Colors.RESET}")
+    print(f"\n  {Colors.BOLD}2. Exploración y recomendación semántica de catálogo (Product RAG):{Colors.RESET}")
+    print(f"     > {Colors.CYAN}¿Qué cremas faciales o lociones hidratantes tienen?{Colors.RESET}")
+    print(f"     > {Colors.CYAN}Recomiéndame productos desmaquilladores{Colors.RESET}")
+    print(f"\n  {Colors.BOLD}3. Cotizaciones y pedidos directos (Product Resolver & ERP):{Colors.RESET}")
     print(f"     > {Colors.CYAN}Cotízame 5 unidades del SKU 1{Colors.RESET}")
-    print(f"     > {Colors.CYAN}Necesito 10 unidades del SKU 1 con Siderperu y 2 del SKU 2{Colors.RESET}")
-    print(f"\n  {Colors.BOLD}2. Prueba de Human-in-the-Loop (HITL) - Información faltante:{Colors.RESET}")
-    print(f"     > {Colors.CYAN}Hola, quiero hacer un pedido de productos{Colors.RESET}")
-    print(f"     {Colors.DIM}El agente detectará que faltan SKUs e interrumpirá para pedirte los códigos.{Colors.RESET}")
-    print(f"\n  {Colors.BOLD}3. Prueba de HITL - Producto no autorizado:{Colors.RESET}")
-    print(f"     > {Colors.CYAN}Quiero cotizar 3 unidades del SKU 999999{Colors.RESET}")
-    print(f"     {Colors.DIM}El agente verificará view_user_authorized_products y te solicitará confirmar o cambiar.{Colors.RESET}")
-    print(f"\n  {Colors.BOLD}4. Prueba de HITL - Conflicto de proveedores (múltiples partners):{Colors.RESET}")
-    print(f"     > {Colors.CYAN}Cotízame 2 unidades del SKU 1{Colors.RESET}  (si tiene varios partners sin especificar)")
-    print(f"     {Colors.DIM}El agente te preguntará interactivamente con cuál proveedor deseas procesar.{Colors.RESET}\n")
+    print(f"     > {Colors.CYAN}Necesito 10 unidades del SKU 1 con Unique S.A. y 2 del SKU 11{Colors.RESET}")
+    print(f"\n  {Colors.BOLD}4. Resolución interactiva Human-in-the-Loop (HITL):{Colors.RESET}")
+    print(f"     > {Colors.CYAN}Hola, quiero hacer un pedido de productos{Colors.RESET} (pedirá los SKUs)")
+    print(f"     > {Colors.CYAN}Cotízame 2 unidades del SKU 1{Colors.RESET} (desambiguará proveedor si aplica)")
+    print(f"\n  {Colors.BOLD}5. Memoria semántica a largo plazo:{Colors.RESET}")
+    print(f"     > {Colors.CYAN}/memory{Colors.RESET} (consulta las cotizaciones y preferencias registradas)\n")
 
 
 async def handle_interrupt(
@@ -165,10 +169,20 @@ async def chat_loop(user_id: int = 5, debug: bool = False):
     odoo_settings = get_odoo_settings()
     llm = get_default_llm()
 
-    # Compilar el grafo con MemorySaver para persistencia del hilo y soporte HITL
-    checkpointer = MemorySaver()
-    app = build_product_resolver_graph(
+    # Compilar el grafo con AsyncPostgresSaver (o fallback a MemorySaver)
+    try:
+        checkpointer = await get_postgres_checkpointer(pool=pool)
+    except Exception as e:
+        checkpointer = MemorySaver()
+
+    # Inicializar almacén de memoria semántica a largo plazo
+    embeddings = get_embedding_service()
+    memory_store = UserMemoryStore(pool=pool, embedding_service=embeddings)
+
+    # Compilar el grafo principal unificado
+    app = build_main_graph(
         llm=llm,
+        memory_store=memory_store,
         checkpointer=checkpointer,
     )
 
@@ -224,6 +238,18 @@ async def chat_loop(user_id: int = 5, debug: bool = False):
                 print(f"{Colors.RED}Uso: /user <id_numérico> (ej: /user 5){Colors.RESET}")
             continue
 
+        if cmd_lower == "/memory":
+            mems = await memory_store.get_user_memories(current_user_id, limit=5)
+            if mems:
+                print(f"\n{Colors.BOLD}🧠 MEMORIA SEMÁNTICA (Usuario {current_user_id}):{Colors.RESET}")
+                for m in mems:
+                    date_str = str(m['created_at'])[:19]
+                    print(f"  • {Colors.DIM}[{date_str}]{Colors.RESET} {m['content']}")
+            else:
+                print(f"\n{Colors.DIM}No hay memorias registradas para el usuario {current_user_id}.{Colors.RESET}")
+            print()
+            continue
+
         if cmd_lower in ("/info", "/status"):
             print(f"\n{Colors.BOLD}ℹ️ ESTADO DEL SISTEMA:{Colors.RESET}")
             print(f"  • Modelo LLM: {settings.model_name} ({settings.provider})")
@@ -234,14 +260,18 @@ async def chat_loop(user_id: int = 5, debug: bool = False):
             print()
             continue
 
-        # Ejecución de la consulta contra el grafo
+        # Ejecución de la consulta contra el grafo unificado
         config = {"configurable": {"thread_id": current_thread_id}}
         print(f"{Colors.DIM}⏳ Procesando con Spark Agent...{Colors.RESET}")
         t0 = time.perf_counter()
 
         try:
             await app.ainvoke(
-                {"raw_query": user_input, "user_id": str(current_user_id)},
+                {
+                    "raw_query": user_input,
+                    "user_id": current_user_id,
+                    "session_id": current_thread_id,
+                },
                 config=config,
             )
         except Exception as e:
@@ -260,16 +290,30 @@ async def chat_loop(user_id: int = 5, debug: bool = False):
 
         t1 = time.perf_counter()
 
-        # Obtener respuesta final
+        # Extraer variables del estado unificado
+        intent = state.values.get("intent")
+        intent_reasoning = state.values.get("intent_reasoning")
+        user_context = state.values.get("user_context")
+        saved_memory_id = state.values.get("saved_memory_id")
         final_response = state.values.get("final_response")
         grouped_products = state.values.get("grouped_products", {})
         items = state.values.get("items", {})
+        matched_skus = state.values.get("matched_skus", [])
 
         # Impresión de depuración si está activo
         if debug:
             print(f"\n{Colors.CYAN}{'-' * 30} DEBUG INFO ({t1 - t0:.2f}s) {'-' * 30}{Colors.RESET}")
-            print(f"{Colors.BOLD}Items detectados:{Colors.RESET} {items}")
-            print(f"{Colors.BOLD}Grupos por partner:{Colors.RESET} {list(grouped_products.keys())}")
+            print(f"{Colors.BOLD}Intención detectada:{Colors.RESET} {intent} ({intent_reasoning})")
+            if user_context:
+                print(f"{Colors.BOLD}Contexto de memoria inyectado:{Colors.RESET}\n{user_context}")
+            if saved_memory_id:
+                print(f"{Colors.BOLD}Memoria persistida ID:{Colors.RESET} {saved_memory_id}")
+            if matched_skus:
+                print(f"{Colors.BOLD}SKUs sugeridos (RAG):{Colors.RESET} {matched_skus}")
+            if items:
+                print(f"{Colors.BOLD}Items cotizados:{Colors.RESET} {items}")
+            if grouped_products:
+                print(f"{Colors.BOLD}Grupos por partner:{Colors.RESET} {list(grouped_products.keys())}")
             print(f"{Colors.CYAN}{'-' * 72}{Colors.RESET}\n")
 
         # Imprimir respuesta al usuario

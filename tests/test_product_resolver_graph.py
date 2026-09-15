@@ -407,3 +407,69 @@ async def test_product_resolver_group_by_multiple_partners(mock_product_tool, mo
     assert aceros_item["sku"] == "11"
     assert aceros_item["requested_qty"] == 3.0
     assert aceros_item["subtotal"] == 118.5  # 39.5 * 3
+
+
+@pytest.mark.asyncio
+async def test_product_resolver_hitl_escape_on_clarification_question(
+    mock_product_tool,
+    mock_supplier_tool,
+    mock_ownership_tool,
+):
+    """Verifica que si el usuario responde al HITL con una pregunta informativa en vez de SKUs,
+    el grafo no entre en bucle infinito y escape limpiamente a synthesize_response."""
+    mock_extractor = AsyncMock()
+    # Tanto en el intento inicial como tras la aclaración, no hay SKUs en la consulta del usuario
+    mock_extractor.ainvoke.return_value = ExtractionResult(
+        items=[],
+        is_complete=False,
+        missing_reason="El usuario no especificó códigos SKU.",
+    )
+
+    mock_synthesizer = AsyncMock()
+    mock_synthesizer.ainvoke.return_value = SynthesizeResponse(
+        response_text="Con gusto, los códigos disponibles son SKU 1 y SKU 11. ¿Cuál deseas cotizar?"
+    )
+
+    mock_llm = MagicMock(spec=BaseChatModel)
+    def side_effect(schema):
+        if schema == ExtractionResult:
+            return mock_extractor
+        elif schema == SynthesizeResponse:
+            return mock_synthesizer
+        return AsyncMock()
+
+    mock_llm.with_structured_output.side_effect = side_effect
+
+    app = build_product_resolver_graph(
+        llm=mock_llm,
+        product_tool=mock_product_tool,
+        ownership_tool=mock_ownership_tool,
+        supplier_tool=mock_supplier_tool,
+        checkpointer=MemorySaver(),
+    )
+
+    config = {"configurable": {"thread_id": "thread-hitl-escape-test"}}
+
+    # Turno 1: Usuario pregunta precio sin SKUs
+    result_turn1 = await app.ainvoke(
+        {"raw_query": "me parecen interesantes, qué precio tienen?", "user_id": "5"},
+        config=config,
+    )
+
+    # Debe interrumpir en HITL 1
+    state1 = await app.aget_state(config)
+    assert len(state1.tasks) > 0
+    assert len(state1.tasks[0].interrupts) > 0
+    assert state1.tasks[0].interrupts[0].value["type"] == "missing_info"
+
+    # Turno 2: Usuario responde con una pregunta informativa al interrupt
+    result_turn2 = await app.ainvoke(
+        Command(resume="me podrias dar los codigos de los productos anteriormente recomendados ?"),
+        config=config,
+    )
+
+    # Debe escapar limpiamente a synthesize_response SIN volver a interrumpir
+    state2 = await app.aget_state(config)
+    assert not any(t.interrupts for t in state2.tasks)
+    assert result_turn2.get("final_response") == "Con gusto, los códigos disponibles son SKU 1 y SKU 11. ¿Cuál deseas cotizar?"
+    assert result_turn2.get("clarification_count") == 1

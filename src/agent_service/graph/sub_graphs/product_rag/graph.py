@@ -61,3 +61,15 @@ def build_rag_product_graph(
     workflow.add_edge("synthesize", END)
 
     return workflow.compile()
+
+
+def get_product_rag_graph():
+    """Fábrica sin argumentos para inspección visual en LangGraph Studio."""
+    from src.agent_service.core.llms.factory import get_default_llm
+    from src.agent_service.config.database import get_db_pool
+    from src.agent_service.core.embeddings.factory import get_embedding_service
+    llm = get_default_llm()
+    pool = get_db_pool()
+    embeddings = get_embedding_service()
+    vector_store = ProductVectorStore(pool=pool, embedding_service=embeddings)
+    return build_rag_product_graph(llm=llm, vector_store=vector_store)

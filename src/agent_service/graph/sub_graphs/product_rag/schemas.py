@@ -5,11 +5,13 @@ from langchain_core.documents import Document
 
 class ProductCandidate(BaseModel):
     index: int = Field(description="Índice numérico asignado al producto candidato.")
+    sku: Optional[str] = Field(default=None, description="Código SKU comercial del producto.")
     name: str = Field(description="Nombre comercial del producto.")
     description: str = Field(description="Descripción y detalles técnicos del producto.")
 
     def to_prompt_item(self) -> str:
-        return f"[{self.index}] {self.name}\n    Detalle: {self.description}"
+        sku_str = f" [SKU: {self.sku}]" if self.sku else ""
+        return f"[{self.index}]{sku_str} {self.name}\n    Detalle: {self.description}"
 
 
 def format_candidates_for_prompt(docs: List[Document], max_desc_len: int = 300) -> str:
@@ -19,6 +21,7 @@ def format_candidates_for_prompt(docs: List[Document], max_desc_len: int = 300) 
     candidates = [
         ProductCandidate(
             index=idx,
+            sku=str(doc.metadata.get("sku")) if doc.metadata.get("sku") is not None else None,
             name=doc.metadata.get("name") or "Producto sin nombre",
             description=(doc.page_content or "")[:max_desc_len].strip(),
         )

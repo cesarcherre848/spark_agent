@@ -1,0 +1,13 @@
+{
+  "python_version": "3.9",
+  "dependencies": [
+    "."
+  ],
+  "graphs": {
+    "spark_agent": "./src/agent_service/graph/main_graph.py:get_main_graph",
+    "product_resolver": "./src/agent_service/graph/sub_graphs/product_resolver/graph.py:get_product_resolver_graph",
+    "product_rag": "./src/agent_service/graph/sub_graphs/product_rag/graph.py:get_product_rag_graph",
+    "user_memory": "./src/agent_service/graph/sub_graphs/user_memory/graph.py:get_user_memory_graph"
+  },
+  "env": ".env.dev"
+}

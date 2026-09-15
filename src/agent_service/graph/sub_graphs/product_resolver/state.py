@@ -24,3 +24,7 @@ class ProductResolverState(TypedDict, total=False):
     tool_raw_output: List[Dict[str, Any]]       # Respuesta cruda devuelta por get_product_by_skus
     grouped_products: Dict[str, List[Dict[str, Any]]]  # Agrupado por partner_id: {"p_101": [...]}
     final_response: Optional[str]               # Texto estructurado devuelto al output user
+    memory_to_save: Optional[str]               # Resumen breve para persistencia en memoria semántica
+    user_context: Optional[str]                 # Contexto de memoria a largo plazo recuperado semánticamente
+    matched_skus: Optional[List[str]]           # SKUs recientemente recuperados en turnos previos (ej. RAG)
+    clarification_count: int                    # Contador de aclaraciones HITL para evitar loops infinitos

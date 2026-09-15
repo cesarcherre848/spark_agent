@@ -17,14 +17,42 @@ def bind_temperature(llm: Any, temperature: float) -> Any:
     mientras tareas expresivas (reformulación, síntesis, redacción comercial) utilicen
     temperaturas superiores (0.3 a 0.7) sobre la misma instancia del modelo base.
     """
-    # Si es un mock en pruebas unitarias, preservamos su comportamiento
     if "unittest.mock" in type(llm).__module__:
-        if hasattr(llm, "bind") and getattr(llm.bind, "return_value", None) == llm:
-            return llm.bind(temperature=temperature)
+        if hasattr(llm, "bind"):
+            if getattr(llm.bind, "side_effect", None) is not None:
+                return llm.bind(temperature=temperature)
+            if "return_value" in getattr(llm.bind, "__dict__", {}):
+                return llm.bind(temperature=temperature)
         return llm
 
     if hasattr(llm, "bind"):
         return llm.bind(temperature=temperature)
+    return llm
+
+
+def bind_structured_output(llm: Any, schema: Any, **kwargs: Any) -> Any:
+    """Vincula una salida estructurada de manera robusta y compatible entre proveedores y mocks.
+
+    Para modelos ChatGoogleGenerativeAI (especialmente variantes con razonamiento como
+    gemini-3-flash-preview), utiliza method='json_mode' por defecto a menos que se
+    especifique otro, garantizando que el modelo procese el esquema sin emitir JSON en texto plano
+    que provoque un resultado None por falta de tool_calls.
+    Para mocks de pruebas unitarias, tolera firmas de mocks que no acepten kwargs.
+    """
+    if "unittest.mock" in type(llm).__module__:
+        if hasattr(llm, "with_structured_output"):
+            try:
+                return llm.with_structured_output(schema, **kwargs)
+            except TypeError:
+                return llm.with_structured_output(schema)
+        return llm
+
+    underlying = getattr(llm, "bound", llm)
+    if "ChatGoogleGenerativeAI" in underlying.__class__.__name__ and "method" not in kwargs:
+        kwargs["method"] = "json_mode"
+
+    if hasattr(llm, "with_structured_output"):
+        return llm.with_structured_output(schema, **kwargs)
     return llm
 
 

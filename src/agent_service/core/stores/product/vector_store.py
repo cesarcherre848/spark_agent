@@ -140,6 +140,9 @@ class ProductVectorStore(VectorStore):
             "ai_model": self._ai_model,
         }
 
+        if getattr(self._pool, "closed", False) is True:
+            await self._pool.open()
+
         async with self._pool.connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(self._compiled_query, params)

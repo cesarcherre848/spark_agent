@@ -46,13 +46,11 @@ def sample_documents():
 
 
 def test_format_candidates_for_prompt(sample_documents):
-    """Verifica que el helper de candidatos formatee de manera limpia sin filtrar SKUs al LLM."""
+    """Verifica que el helper de candidatos formatee de manera limpia incluyendo SKUs para trazabilidad comercial."""
     result = format_candidates_for_prompt(sample_documents, max_desc_len=50)
     
-    assert "[1] Esmalte Gel Rojo Rubí" in result
-    assert "[2] Esmalte Mate Nude" in result
-    assert "ESM-ROJO-001" not in result
-    assert "ESM-NUDE-002" not in result
+    assert "[1] [SKU: ESM-ROJO-001] Esmalte Gel Rojo Rubí" in result
+    assert "[2] [SKU: ESM-NUDE-002] Esmalte Mate Nude" in result
 
 
 def test_format_candidates_for_prompt_empty():
@@ -263,3 +261,59 @@ async def test_rag_product_graph_max_iterations_fallback(mock_vector_store, samp
     assert final_state["is_sufficient"] is False
     assert final_state["matched_skus"] == []
     assert "no contamos con taladros" in final_state["final_response"]
+
+
+@pytest.mark.asyncio
+async def test_product_rag_judge_none_defense():
+    """Verifica que si el evaluador estructurado devuelve None (ej. fallo o formato inesperado),
+    el grafo no lance 'NoneType' object has no attribute 'selected_indices' y continúe con el fallback.
+    """
+    mock_vector_store = MagicMock(spec=ProductVectorStore)
+    mock_vector_store.ahybrid_search = AsyncMock(return_value=[
+        Document(
+            page_content="Loción hidratante con notas de jazmín.",
+            metadata={"id": 1, "sku": "SKU-99", "name": "Loción Jazmín"}
+        )
+    ])
+
+    mock_normalizer = AsyncMock()
+    mock_normalizer.ainvoke.return_value = NormalizedQuery(search_query="locion jazmin")
+
+    mock_judge = AsyncMock()
+    mock_judge.ainvoke.return_value = None  # Simula el retorno None que causaba el bug
+
+    mock_synthesizer = AsyncMock()
+    mock_synthesizer.ainvoke.return_value = FinalAnswer(
+        response_text="Te presentamos la Loción Jazmín (Código SKU: SKU-99)."
+    )
+
+    mock_llm = MagicMock(spec=BaseChatModel)
+    def side_effect(schema):
+        if schema == NormalizedQuery:
+            return mock_normalizer
+        elif schema == EvaluationResult:
+            return mock_judge
+        elif schema == FinalAnswer:
+            return mock_synthesizer
+        return AsyncMock()
+
+    mock_llm.with_structured_output.side_effect = side_effect
+
+    app = build_rag_product_graph(
+        llm=mock_llm,
+        vector_store=mock_vector_store,
+        top_k=5,
+        default_max_iterations=1,
+    )
+
+    initial_state = {
+        "raw_query": "busco crema con aroma a jazmín",
+        "user_id": 5,
+    }
+
+    final_state = await app.ainvoke(initial_state)
+
+    # Verificación de robustez: no hubo excepción y se generó respuesta
+    assert final_state["is_sufficient"] is True
+    assert final_state["matched_skus"] == ["SKU-99"]
+    assert "Loción Jazmín" in final_state["final_response"]

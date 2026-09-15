@@ -15,10 +15,14 @@ from src.agent_service.tools.product_tools import (
 
 def _route_after_extraction(
     state: ProductResolverState,
-) -> Literal["check_partner_conflicts", "feedback_ask_missing"]:
-    """Enrutador después de la extracción: si faltan datos esenciales va a feedback; si está completo avanza."""
+) -> Literal["check_partner_conflicts", "feedback_ask_missing", "synthesize_response"]:
+    """Enrutador después de la extracción: si faltan datos esenciales va a feedback; si está completo avanza.
+    Si ya se intentó aclarar al menos una vez (clarification_count >= 1) y no hay SKUs, escapa a síntesis.
+    """
     if state.get("is_extraction_complete", False):
         return "check_partner_conflicts"
+    if state.get("clarification_count", 0) >= 1:
+        return "synthesize_response"
     return "feedback_ask_missing"
 
 
@@ -62,13 +66,14 @@ def build_product_resolver_graph(
     # Conexiones
     workflow.add_edge(START, "extract_skus_and_attributes")
 
-    # Bucle 1: Extracción completa vs faltan datos
+    # Bucle 1: Extracción completa vs faltan datos (o escape tras aclaración)
     workflow.add_conditional_edges(
         "extract_skus_and_attributes",
         _route_after_extraction,
         {
             "check_partner_conflicts": "check_partner_conflicts",
             "feedback_ask_missing": "feedback_ask_missing",
+            "synthesize_response": "synthesize_response",
         },
     )
     workflow.add_edge("feedback_ask_missing", "extract_skus_and_attributes")
@@ -93,3 +98,10 @@ def build_product_resolver_graph(
     resolved_checkpointer = checkpointer if checkpointer is not None else MemorySaver()
 
     return workflow.compile(checkpointer=resolved_checkpointer)
+
+
+def get_product_resolver_graph():
+    """Fábrica sin argumentos para inspección visual en LangGraph Studio."""
+    from src.agent_service.core.llms.factory import get_default_llm
+    llm = get_default_llm()
+    return build_product_resolver_graph(llm=llm, checkpointer=MemorySaver())

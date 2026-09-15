@@ -1,7 +1,7 @@
 import logging
 from typing import Dict, Any, List, Optional, Callable, Awaitable, Tuple
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
+from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, trim_messages
 from langchain_core.runnables import RunnableConfig
 from langchain_core.runnables.config import var_child_runnable_config
 from langgraph.types import interrupt
@@ -20,7 +20,7 @@ from src.agent_service.tools.product_tools import (
     validate_product_ownership,
 )
 
-from src.agent_service.core.llms import bind_temperature
+from src.agent_service.core.llms import bind_temperature, bind_structured_output
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +35,10 @@ class ProductResolverNodes:
         ownership_tool: Any = validate_product_ownership,
         supplier_tool: Any = search_suppliers,
         partner_resolver: Optional[
-            Callable[[str, str, Optional[str]], Awaitable[Tuple[bool, Optional[str], List[str], Dict[str, str]]]]
+            Callable[
+                [str, Optional[int], Optional[str]],
+                Awaitable[Tuple[bool, Optional[str], List[str], Optional[Dict[str, Any]]]]
+            ]
         ] = None,
     ):
         self._llm = llm
@@ -45,8 +48,8 @@ class ProductResolverNodes:
         self._partner_resolver = partner_resolver
 
         # Extracción estricta sin alucinación (temp 0.0) y síntesis comercial balanceada (temp 0.35)
-        self._extractor = bind_temperature(llm, 0.0).with_structured_output(ExtractionResult)
-        self._synthesizer = bind_temperature(llm, 0.35).with_structured_output(SynthesizeResponse)
+        self._extractor = bind_structured_output(bind_temperature(llm, 0.0), ExtractionResult)
+        self._synthesizer = bind_structured_output(bind_temperature(llm, 0.35), SynthesizeResponse)
 
 
     async def extract_skus_and_attributes(self, state: ProductResolverState) -> dict:
@@ -60,32 +63,58 @@ class ProductResolverNodes:
         raw_query = (raw_query or "").strip()
         user_id = state.get("user_id", "5")
 
+        # Recortar historial para que el extractor entienda referencias contextuales (ej. '¿qué precio tienen?')
+        trimmed_history = trim_messages(
+            state.get("messages", []),
+            max_tokens=10,
+            strategy="last",
+            token_counter=len,
+        )
+
         system_prompt = """
             Eres un especialista en extracción de pedidos y catálogo para un ERP comercial.
 
             Tareas:
-                - Extraer con precisión todos los códigos SKU o referencias de producto mencionados por el usuario.
-                - Extraer cantidades y atributos técnicos (ej. cantidad, medidas, color).
-                - Identificar el nombre del proveedor o partner si el usuario lo menciona (ej. 'de Siderperu', 'de Aceros Arequipa').
-                - Evaluar si la información es completa (is_complete = True) o si falta información indispensable para procesar (is_complete = False).
-                  Si no hay ningún SKU o la solicitud es totalmente incomprensible, marca is_complete = False y explica qué falta.
+                - Extraer con precisión todos los códigos SKU o referencias de producto solicitados por el cliente.
+                - IMPORTANTE: Si el cliente hace referencia a productos recomendados o discutidos previamente en el historial de la conversación (ej: '¿qué precio tienen?', 'cotízamelos', 'el primero', 'los recomendados', 'cuánto cuestan', o menciona sus nombres), revisa el historial y los SKUs sugeridos en el contexto, y extrae los códigos SKU correspondientes con cantidad 1 por defecto.
+                - Extraer cantidades y atributos técnicos (ej. cantidad, medidas, color). Si no se especifica cantidad, asume 1 por defecto para cotización.
+                - Identificar el nombre del proveedor o partner si el usuario lo menciona (ej. 'de Siderperu', 'de Unique').
+                - Evaluar si la información es completa (is_complete = True) si se identificó al menos un SKU.
+                  Si no hay ningún SKU identificable en la consulta ni en el historial reciente, marca is_complete = False y explica qué falta.
         """
 
+        context_parts = []
+        user_context = state.get("user_context")
+        if user_context:
+            context_parts.append(f"Antecedentes de interacciones previas:\n{user_context}")
+
+        matched_skus = state.get("matched_skus")
+        if matched_skus:
+            context_parts.append(f"Códigos SKU recientemente sugeridos o identificados en el catálogo: {', '.join(map(str, matched_skus))}")
+
+        context_block = f"\n{chr(10).join(context_parts)}\n" if context_parts else ""
+
         user_prompt = f"""
-            Consulta del cliente:
+            {context_block}Consulta actual del cliente:
             {raw_query}
         """
 
         messages = [
             SystemMessage(content=system_prompt),
+            *trimmed_history,
             HumanMessage(content=user_prompt),
         ]
 
-        extraction: ExtractionResult = await self._extractor.ainvoke(messages)
+        extraction: Optional[ExtractionResult] = await self._extractor.ainvoke(messages)
+
+        if extraction is None:
+            extraction = ExtractionResult(is_complete=False, missing_info_prompt="Por favor especifica el código SKU o detalles de los productos que deseas cotizar.")
+        elif isinstance(extraction, dict):
+            extraction = ExtractionResult(**extraction)
 
         items: Dict[str, SKUItem] = {}
 
-        if extraction.is_complete and extraction.items:
+        if getattr(extraction, "is_complete", False) and getattr(extraction, "items", None):
             # Opción A: Si se inyectó un partner_resolver personalizado (compatibilidad con mocks directos)
             if self._partner_resolver is not None:
                 for item in extraction.items:
@@ -171,6 +200,8 @@ class ProductResolverNodes:
     ) -> dict:
         """Nodo 2 (HITL 1): Pausa la ejecución para solicitar información faltante o SKUs autorizados al usuario."""
         var_child_runnable_config.set(config)
+        current_clarifications = state.get("clarification_count", 0)
+        matched_skus = state.get("matched_skus", [])
         items = state.get("items", {})
         unauthorized = [sku for sku, it in items.items() if not it.get("is_owner", False)]
 
@@ -186,13 +217,15 @@ class ProductResolverNodes:
                 "question": prompt_message,
             }
         else:
+            hint = f" (SKUs recientemente sugeridos: {', '.join(map(str, matched_skus))})" if matched_skus else ""
             prompt_message = (
-                "Para procesar tu pedido necesitamos más información: "
-                "por favor indícanos el código SKU exacto o los detalles de los productos que deseas."
+                f"Para procesar tu pedido necesitamos más información: "
+                f"por favor indícanos el código SKU exacto o los detalles de los productos que deseas{hint}."
             )
             interrupt_payload = {
                 "type": "missing_info",
                 "question": prompt_message,
+                "suggested_skus": matched_skus,
             }
 
         # Interrupción Human-in-the-Loop de LangGraph
@@ -201,6 +234,7 @@ class ProductResolverNodes:
 
         return {
             "raw_query": user_clarification,
+            "clarification_count": current_clarifications + 1,
             "messages": [
                 AIMessage(content=prompt_message),
                 HumanMessage(content=user_clarification),
@@ -352,6 +386,13 @@ class ProductResolverNodes:
         grouped = state.get("grouped_products", {})
         raw_query = state.get("raw_query", "")
 
+        trimmed_history = trim_messages(
+            state.get("messages", []),
+            max_tokens=10,
+            strategy="last",
+            token_counter=len,
+        )
+
         # Formatear resumen para el prompt del LLM
         lines = []
         for partner_id, prods in grouped.items():
@@ -371,33 +412,53 @@ class ProductResolverNodes:
                 )
             lines.append(f"**Total Proveedor:** {total_partner:.2f} {currency}\n")
 
-        context_text = "\n".join(lines) if lines else "No se encontraron productos disponibles."
+        context_text = "\n".join(lines) if lines else "No se cotizaron productos específicos en este turno."
 
         system_prompt = """
-            Eres un asesor comercial experto en ERP para consolidación de pedidos multimarca y multiproveedor.
+            Eres un asesor comercial experto en ERP para consolidación de pedidos multimarca y catálogo comercial.
 
             Tareas:
-                - Redactar una respuesta clara, profesional y estructurada para el cliente.
-                - Organizar los productos agrupados por cada proveedor (partner).
-                - Especificar cantidades solicitadas, precios unitarios, subtotales y total consolidado por proveedor.
+                - Redactar una respuesta clara, profesional, servicial y estructurada para el cliente.
+                - Si hay productos cotizados por proveedor: Organízalos claramente por proveedor con cantidades, precios unitarios y subtotales.
+                - Si no hay productos cotizados (ej. el cliente hizo una pregunta, solicitó códigos o la información fue insuficiente para cotizar): Responde con amabilidad aclarando sus dudas a partir del historial, indícale los códigos SKU disponibles si los conoces o explícale con claridad cómo puede solicitarlos para cotizar.
                 - Mantener un tono servicial y cordial.
         """
 
-        user_prompt = f"""
-            Solicitud original del cliente: {raw_query}
+        matched_skus = state.get("matched_skus", [])
+        skus_hint = f"\nCódigos SKU sugeridos previamente en la conversación: {', '.join(map(str, matched_skus))}\n" if matched_skus else ""
 
-            Productos cotizados por proveedor:
+        user_prompt = f"""
+            Solicitud o consulta del cliente: {raw_query}
+            {skus_hint}
+            Productos cotizados por proveedor en Odoo ERP:
             {context_text}
         """
 
         messages = [
             SystemMessage(content=system_prompt),
+            *trimmed_history,
             HumanMessage(content=user_prompt),
         ]
 
-        answer: SynthesizeResponse = await self._synthesizer.ainvoke(messages)
+        answer: Optional[SynthesizeResponse] = await self._synthesizer.ainvoke(messages)
+        final_text = (
+            answer.response_text
+            if answer and hasattr(answer, "response_text") and answer.response_text
+            else "Se completó la cotización de los productos solicitados."
+        )
+
+        # Generar resumen compacto para memoria a largo plazo si hubo productos cotizados
+        recap_items = []
+        for p_id, prods in grouped.items():
+            p_name = prods[0].get("partner_name", p_id) if prods else p_id
+            for p in prods:
+                recap_items.append(
+                    f"{p.get('requested_qty', 1)} unidades del SKU {p.get('sku')} ({p.get('name')}) con {p_name}"
+                )
+        memory_to_save = f"Cotización realizada: {', '.join(recap_items)}." if recap_items else None
 
         return {
-            "final_response": answer.response_text,
-            "messages": [AIMessage(content=answer.response_text)],
+            "final_response": final_text,
+            "messages": [AIMessage(content=final_text)],
+            "memory_to_save": memory_to_save,
         }

@@ -90,3 +90,25 @@ def test_bind_temperature_per_call():
     cre_llm = get_creative_llm(api_key="test_key")
     assert cre_llm.temperature == 0.7
 
+
+def test_bind_structured_output():
+    """Verifica que bind_structured_output configure method='json_mode' para Google y tolere mocks."""
+    from pydantic import BaseModel
+    from unittest.mock import MagicMock
+    from src.agent_service.core.llms.factory import bind_structured_output
+
+    class SampleSchema(BaseModel):
+        field: str
+
+    # 1. Comportamiento con ChatGoogleGenerativeAI
+    base_llm = create_chat_model(provider="google", api_key="test_key")
+    bound_structured = bind_structured_output(base_llm, SampleSchema)
+    assert bound_structured is not None
+
+    # 2. Tolerancia con mocks de unittest
+    mock_llm = MagicMock()
+    mock_llm.with_structured_output.return_value = "mock_output"
+    res = bind_structured_output(mock_llm, SampleSchema)
+    assert res == "mock_output"
+    mock_llm.with_structured_output.assert_called_once_with(SampleSchema)
+

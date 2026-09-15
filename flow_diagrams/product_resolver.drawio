@@ -1,13 +1,13 @@
 <mxfile host="Electron">
   <diagram name="Page-1" id="nAcOIkiHYYpHC04GPIdd">
-    <mxGraphModel dx="1648" dy="1008" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="850" pageHeight="1100" math="0" shadow="0">
+    <mxGraphModel dx="791" dy="484" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="850" pageHeight="1100" math="0" shadow="0">
       <root>
         <mxCell id="0" />
         <mxCell id="1" parent="0" />
         <mxCell id="us4l5Oe7Tbn-DUP4-ii_-4" edge="1" parent="1" source="us4l5Oe7Tbn-DUP4-ii_-1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" target="us4l5Oe7Tbn-DUP4-ii_-2">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="us4l5Oe7Tbn-DUP4-ii_-1" parent="1" style="rounded=1;whiteSpace=wrap;html=1;" value="input user" vertex="1">
+        <mxCell id="us4l5Oe7Tbn-DUP4-ii_-1" parent="1" style="rounded=1;whiteSpace=wrap;html=1;" value="input" vertex="1">
           <mxGeometry height="40" width="120" x="330" y="110" as="geometry" />
         </mxCell>
         <mxCell id="us4l5Oe7Tbn-DUP4-ii_-15" edge="1" parent="1" source="us4l5Oe7Tbn-DUP4-ii_-2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" target="us4l5Oe7Tbn-DUP4-ii_-3">
@@ -36,7 +36,7 @@
         <mxCell id="us4l5Oe7Tbn-DUP4-ii_-6" parent="1" style="rounded=0;whiteSpace=wrap;html=1;" value="Tool&lt;div&gt;(&lt;span style=&quot;color: rgb(165, 214, 255); background-color: rgb(18, 19, 20); font-family: Menlo, Monaco, &amp;quot;Courier New&amp;quot;, monospace; white-space: pre;&quot;&gt;get_product_by_skus)&lt;/span&gt;&lt;/div&gt;" vertex="1">
           <mxGeometry height="60" width="170" x="305" y="630" as="geometry" />
         </mxCell>
-        <mxCell id="us4l5Oe7Tbn-DUP4-ii_-8" parent="1" style="rounded=1;whiteSpace=wrap;html=1;" value="output user" vertex="1">
+        <mxCell id="us4l5Oe7Tbn-DUP4-ii_-8" parent="1" style="rounded=1;whiteSpace=wrap;html=1;" value="output" vertex="1">
           <mxGeometry height="40" width="120" x="330" y="940" as="geometry" />
         </mxCell>
         <mxCell id="us4l5Oe7Tbn-DUP4-ii_-64" edge="1" parent="1" source="us4l5Oe7Tbn-DUP4-ii_-16" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;">

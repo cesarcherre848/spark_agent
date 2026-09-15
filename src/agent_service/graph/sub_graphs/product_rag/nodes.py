@@ -1,7 +1,7 @@
 from typing import List, Optional
 from langchain_core.documents import Document
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
 
 from src.agent_service.core.stores.product.vector_store import ProductVectorStore
 from src.agent_service.core.stores.product.schemas import ProductCatalogFilter
@@ -13,7 +13,7 @@ from src.agent_service.graph.sub_graphs.product_rag.schemas import (
     format_candidates_for_prompt,
 )
 from src.agent_service.graph.sub_graphs.product_rag.state import ProductRagState
-from src.agent_service.core.llms import bind_temperature
+from src.agent_service.core.llms import bind_temperature, bind_structured_output
 
 
 class ProductRagNodes:
@@ -29,12 +29,12 @@ class ProductRagNodes:
         self._top_k = top_k
         self._default_max_iterations = default_max_iterations
 
-        # Temperaturas por llamada: normalización y evaluación estrictas (0.0),
+        # Temperaturas por llamada con bind_structured_output: normalización y evaluación estrictas (0.0/0.1),
         # reformulación reflexiva creativa (0.5) y síntesis comercial balanceada (0.35).
-        self._normalizer = bind_temperature(llm, 0.15).with_structured_output(NormalizedQuery)
-        self._judge = bind_temperature(llm, 0.1).with_structured_output(EvaluationResult)
-        self._refiner = bind_temperature(llm, 0.5).with_structured_output(QueryRefinementResult)
-        self._synthesizer = bind_temperature(llm, 0.35).with_structured_output(FinalAnswer)
+        self._normalizer = bind_structured_output(bind_temperature(llm, 0.15), NormalizedQuery)
+        self._judge = bind_structured_output(bind_temperature(llm, 0.1), EvaluationResult)
+        self._refiner = bind_structured_output(bind_temperature(llm, 0.5), QueryRefinementResult)
+        self._synthesizer = bind_structured_output(bind_temperature(llm, 0.35), FinalAnswer)
 
 
     async def normalize_query(self, state: ProductRagState) -> dict:
@@ -62,10 +62,15 @@ class ProductRagNodes:
             HumanMessage(content=user_prompt),
         ]
 
-        result: NormalizedQuery = await self._normalizer.ainvoke(messages)
+        result: Optional[NormalizedQuery] = await self._normalizer.ainvoke(messages)
+        search_query = (
+            result.search_query
+            if result and hasattr(result, "search_query") and result.search_query
+            else raw_query
+        )
 
         return {
-            "refined_query": result.search_query,
+            "refined_query": search_query,
         }
 
     async def retrieve_products(self, state: ProductRagState) -> dict:
@@ -126,20 +131,33 @@ class ProductRagNodes:
             HumanMessage(content=user_prompt),
         ]
 
-        evaluation: EvaluationResult = await self._judge.ainvoke(messages)
+        evaluation: Optional[EvaluationResult] = await self._judge.ainvoke(messages)
+
+        if evaluation is None:
+            evaluation = EvaluationResult(
+                is_sufficient=len(docs) > 0,
+                selected_indices=list(range(1, min(len(docs) + 1, 4))),
+                critique="Evaluación completada por disponibilidad de catálogo.",
+            )
+        elif isinstance(evaluation, dict):
+            evaluation = EvaluationResult(**evaluation)
+
+        selected_indices = getattr(evaluation, "selected_indices", []) or []
+        is_sufficient = getattr(evaluation, "is_sufficient", False)
+        critique = getattr(evaluation, "critique", "")
 
         # Extracción determinista de SKUs en Python a partir de los índices seleccionados
         matched_skus = [
-            docs[idx - 1].metadata["sku"]
-            for idx in evaluation.selected_indices
-            if 1 <= idx <= len(docs) and docs[idx - 1].metadata.get("sku")
+            str(docs[idx - 1].metadata["sku"])
+            for idx in selected_indices
+            if 1 <= idx <= len(docs) and docs[idx - 1].metadata.get("sku") is not None
         ]
 
         return {
-            "is_sufficient": evaluation.is_sufficient,
-            "selected_indices": evaluation.selected_indices,
+            "is_sufficient": is_sufficient,
+            "selected_indices": selected_indices,
             "matched_skus": matched_skus,
-            "critique": evaluation.critique,
+            "critique": critique,
         }
 
     # Alias por retrocompatibilidad con referencias anteriores
@@ -177,10 +195,15 @@ class ProductRagNodes:
             HumanMessage(content=user_prompt),
         ]
 
-        refinement: QueryRefinementResult = await self._refiner.ainvoke(messages)
+        refinement: Optional[QueryRefinementResult] = await self._refiner.ainvoke(messages)
+        refined_query = (
+            refinement.refined_query
+            if refinement and hasattr(refinement, "refined_query") and refinement.refined_query
+            else current_query
+        )
 
         return {
-            "refined_query": refinement.refined_query,
+            "refined_query": refined_query,
         }
 
     async def synthesize_response(self, state: ProductRagState) -> dict:
@@ -205,9 +228,10 @@ class ProductRagNodes:
 
             Tareas:
                 - Redactar una respuesta cordial, técnica y orientada a la venta.
-                - Si hay productos seleccionados: Recomienda de forma clara las opciones pertinentes, mencionando sus nombres y beneficios clave.
+                - Si hay productos seleccionados: Recomienda de forma clara las opciones pertinentes, mencionando siempre su NOMBRE y CÓDIGO SKU (ej: '1. **Nombre del Producto** (Código SKU: X): ...'). Explica sus beneficios clave.
                 - Si no hay productos disponibles o is_sufficient es False: Explica amablemente que no disponemos de ese artículo exacto en este momento.
                 - No inventes características, precios ni especificaciones ausentes en los candidatos.
+                - Informa al cliente que si desea cotizar o consultar precios de estas opciones, puede indicar los códigos SKU recomendados.
         """
 
         user_prompt = f"""
@@ -224,8 +248,14 @@ class ProductRagNodes:
             HumanMessage(content=user_prompt),
         ]
 
-        answer: FinalAnswer = await self._synthesizer.ainvoke(messages)
+        answer: Optional[FinalAnswer] = await self._synthesizer.ainvoke(messages)
+        final_text = (
+            answer.response_text
+            if answer and hasattr(answer, "response_text") and answer.response_text
+            else "Aquí tienes las opciones identificadas en nuestro catálogo."
+        )
 
         return {
-            "final_response": answer.response_text,
+            "final_response": final_text,
+            "messages": [AIMessage(content=final_text)],
         }

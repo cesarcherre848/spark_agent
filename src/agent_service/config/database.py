@@ -46,6 +46,7 @@ def get_db_pool(
             min_size=min_size,
             max_size=max_size,
             open=False,
+            kwargs={"autocommit": True},
         )
     return _GLOBAL_DB_POOL
 

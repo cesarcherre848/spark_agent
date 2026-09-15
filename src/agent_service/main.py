@@ -1,46 +1,54 @@
-import os
+"""
+src/agent_service/main.py - Entrypoint principal para Spark Agent
+"""
+
+import sys
+from pathlib import Path
+import asyncio
 import warnings
-from typing import TypedDict
 from dotenv import load_dotenv
 
-# Suppress minor environment warnings for clean CLI output
 warnings.filterwarnings("ignore")
 
-from langgraph.graph import StateGraph, START, END
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
-# Load development environment
-load_dotenv(".env.dev")
+# Cargar variables de entorno del entorno de desarrollo
+load_dotenv(PROJECT_ROOT / ".env.dev")
 
-
-# Define State
-class AgentState(TypedDict):
-    message: str
-
-
-# Define Node
-def hello_node(state: AgentState) -> dict:
-    app_name = os.getenv("APP_NAME", "spark_agent")
-    env = os.getenv("ENVIRONMENT", "development")
-    return {
-        "message": f"Hello World from {app_name} in {env} mode!"
-    }
+from src.agent_service.graph.main_graph import (
+    build_main_graph,
+    get_main_graph,
+    MainGraphState,
+)
 
 
-# Build LangGraph Workflow
-def build_graph():
-    builder = StateGraph(AgentState)
-    builder.add_node("hello", hello_node)
-    builder.add_edge(START, "hello")
-    builder.add_edge("hello", END)
-    return builder.compile()
+from src.agent_service.config.database import close_db_pool
 
 
-# Main Entrypoint
+async def async_main():
+    try:
+        print("🚀 Inicializando Spark Agent...")
+        app = get_main_graph()
+        test_query = "Hola, ¿qué servicios y catálogo tienes disponibles?"
+        print(f"💬 Consulta de prueba: '{test_query}'")
+
+        result = await app.ainvoke(
+            {
+                "raw_query": test_query,
+                "user_id": 5,
+            },
+            config={"configurable": {"thread_id": "main-entrypoint-test"}},
+        )
+        print(f"🎯 Intención detectada: {result.get('intent')}")
+        print(f"🤖 Respuesta:\n{result.get('final_response')}")
+    finally:
+        await close_db_pool()
+
+
 def main():
-    print("🚀 Initializing spark_agent...")
-    app = build_graph()
-    result = app.invoke({"message": ""})
-    print(f"✅ Result: {result.get('message')}")
+    asyncio.run(async_main())
 
 
 if __name__ == "__main__":
