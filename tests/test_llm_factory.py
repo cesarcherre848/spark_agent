@@ -112,3 +112,59 @@ def test_bind_structured_output():
     assert res == "mock_output"
     mock_llm.with_structured_output.assert_called_once_with(SampleSchema)
 
+
+def test_clean_text_from_tool_call_artifacts():
+    from src.agent_service.core.llms.factory import clean_text_from_tool_call_artifacts
+
+    # Caso 1: Cadena representando lista de Gemini con call:default_api
+    raw_sample = (
+        "['call:default_api:RecommendationSynthesisResponse{response_text:', "
+        "'He seleccionado para ti las opciones más versátiles.\\n\\n* [5441] Rosa', '}'"
+        "]"
+    )
+    cleaned = clean_text_from_tool_call_artifacts(raw_sample)
+    assert "call:default_api" not in cleaned
+    assert "['" not in cleaned
+    assert "He seleccionado para ti las opciones más versátiles.\n\n* [5441] Rosa" == cleaned
+
+    # Caso 2: Texto normal no se ve alterado
+    normal_text = "Hola, ¿cómo estás? Tenemos productos disponibles."
+    assert clean_text_from_tool_call_artifacts(normal_text) == normal_text
+
+    # Caso 3: Texto vacío o None
+    assert clean_text_from_tool_call_artifacts("") == ""
+    assert clean_text_from_tool_call_artifacts(None) == ""
+
+
+@pytest.mark.asyncio
+async def test_resilient_structured_output_recovers_from_tool_calls():
+    from pydantic import BaseModel
+    from unittest.mock import AsyncMock, MagicMock
+    from src.agent_service.core.llms.factory import ResilientStructuredOutputRunnable
+
+    class SynthSchema(BaseModel):
+        response_text: str
+
+    mock_runnable = AsyncMock()
+    # Simula la respuesta de LangChain cuando Gemini emite tool_calls
+    mock_msg = MagicMock()
+    mock_msg.tool_calls = [
+        {
+            "name": "default_api:SynthSchema",
+            "args": {"response_text": "Texto recuperado de tool_calls exitosamente."},
+        }
+    ]
+    mock_msg.content = "['call:default_api:SynthSchema{response_text:', 'Texto recuperado', '}']"
+
+    mock_runnable.ainvoke.return_value = {
+        "raw": mock_msg,
+        "parsed": None,
+    }
+
+    resilient = ResilientStructuredOutputRunnable(mock_runnable, SynthSchema)
+    result = await resilient.ainvoke("input")
+
+    assert isinstance(result, SynthSchema)
+    assert result.response_text == "Texto recuperado de tool_calls exitosamente."
+
+

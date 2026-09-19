@@ -32,7 +32,49 @@ def bind_temperature(llm: Any, temperature: float) -> Any:
 
 import json
 import re
+import ast
 from langchain_core.runnables import Runnable, RunnableConfig
+
+
+def clean_text_from_tool_call_artifacts(text: str) -> str:
+    """Elimina fragmentos técnicos de llamadas de herramientas o corchetes producidos por serialización de Gemini/LangChain."""
+    if not text:
+        return ""
+    stripped = text.strip()
+
+    # Caso 1: Cadena que representa una lista de Python, ej: "['call:default_api:...{...:', 'texto real', '}']"
+    if stripped.startswith("['") or stripped.startswith('["') or (stripped.startswith("[") and stripped.endswith("]")):
+        try:
+            parsed = ast.literal_eval(stripped)
+            if isinstance(parsed, list):
+                parts = []
+                for item in parsed:
+                    s = str(item).strip()
+                    if s.startswith("call:") or s.startswith("default_api:") or s in ("}", ")", "]", "{"):
+                        continue
+                    parts.append(s)
+                if parts:
+                    clean_res = "\n".join(parts).strip()
+                    if "\\n" in clean_res:
+                        clean_res = clean_res.replace("\\n", "\n")
+                    return clean_res
+        except Exception:
+            pass
+
+    # Caso 2: Bloque con prefijo call:default_api:...
+    m = re.search(
+        r"call:[^{]+(?:\{[^:]+:)?\s*['\"]?(.*?)['\"]?\s*(?:,\s*['\"]\}['\"]|\s*\})?$",
+        stripped,
+        re.DOTALL,
+    )
+    if m:
+        candidate = m.group(1).strip()
+        if candidate:
+            if "\\n" in candidate:
+                candidate = candidate.replace("\\n", "\n")
+            return candidate
+
+    return stripped
 
 
 def _try_parse_schema_from_text(text: str, schema: Any) -> Optional[Any]:
@@ -61,8 +103,42 @@ def _try_parse_schema_from_text(text: str, schema: Any) -> Optional[Any]:
     return None
 
 
+def _extract_from_tool_calls(tool_calls: Any, schema: Any) -> Optional[Any]:
+    """Extrae y valida un esquema Pydantic a partir de la lista tool_calls del mensaje crudo."""
+    if not tool_calls or not isinstance(tool_calls, list):
+        return None
+    for tc in tool_calls:
+        if not isinstance(tc, dict):
+            continue
+        args = tc.get("args")
+        if args and isinstance(args, dict):
+            try:
+                if hasattr(schema, "model_validate"):
+                    return schema.model_validate(args)
+                elif callable(schema):
+                    return schema(**args)
+            except Exception as e:
+                logger.debug(f"No se pudo validar schema desde tool_calls args: {e}")
+    return None
+
+
+def _clean_content_to_text(content_val: Any) -> str:
+    """Extrae texto limpio a partir de content_val, ya sea str o list."""
+    if isinstance(content_val, list):
+        parts = []
+        for item in content_val:
+            s = str(item).strip()
+            if s.startswith("call:") or s.startswith("default_api:") or s in ("}", ")", "]", "{"):
+                continue
+            parts.append(s)
+        text = "\n".join(parts).strip() if parts else str(content_val)
+    else:
+        text = str(content_val or "").strip()
+    return clean_text_from_tool_call_artifacts(text)
+
+
 class ResilientStructuredOutputRunnable(Runnable):
-    """Envuelve un modelo estructurado para rescatar JSON emitido en texto plano si no hubo tool_calls."""
+    """Envuelve un modelo estructurado para rescatar JSON emitido en texto plano o tool_calls no parseados."""
 
     def __init__(self, structured_model: Any, schema: Any):
         self._structured_model = structured_model
@@ -81,13 +157,22 @@ class ResilientStructuredOutputRunnable(Runnable):
         if isinstance(res, dict):
             if res.get("parsed") is not None and isinstance(res["parsed"], self._schema):
                 return res["parsed"]
+
             raw_msg = res.get("raw")
+            # 1. Prioridad: Inspeccionar tool_calls directamente
+            if raw_msg and hasattr(raw_msg, "tool_calls"):
+                recovered_tc = _extract_from_tool_calls(raw_msg.tool_calls, self._schema)
+                if recovered_tc is not None:
+                    logger.info(f"Recuperado exitosamente {getattr(self._schema, '__name__', 'Schema')} desde raw_msg.tool_calls")
+                    return recovered_tc
+
+            # 2. Desempaquetar content limpiando artefactos técnicos
             if raw_msg and hasattr(raw_msg, "content"):
-                recovered = _try_parse_schema_from_text(str(raw_msg.content), self._schema)
+                raw_text = _clean_content_to_text(raw_msg.content)
+                recovered = _try_parse_schema_from_text(raw_text, self._schema)
                 if recovered is not None:
                     logger.info(f"Recuperado exitosamente {getattr(self._schema, '__name__', 'Schema')} desde raw.content")
                     return recovered
-                raw_text = str(raw_msg.content).strip()
                 if raw_text and hasattr(self._schema, "model_fields"):
                     fields = self._schema.model_fields
                     if len(fields) == 1:
@@ -100,11 +185,11 @@ class ResilientStructuredOutputRunnable(Runnable):
         if res is None or hasattr(res, "content"):
             content = getattr(res, "content", "") if res is not None else ""
             if content:
-                recovered = _try_parse_schema_from_text(str(content), self._schema)
+                raw_text = _clean_content_to_text(content)
+                recovered = _try_parse_schema_from_text(raw_text, self._schema)
                 if recovered is not None:
                     logger.info(f"Recuperado exitosamente {getattr(self._schema, '__name__', 'Schema')} desde content")
                     return recovered
-                raw_text = str(content).strip()
                 if raw_text and hasattr(self._schema, "model_fields"):
                     fields = self._schema.model_fields
                     if len(fields) == 1:
@@ -129,12 +214,20 @@ class ResilientStructuredOutputRunnable(Runnable):
         if isinstance(res, dict):
             if res.get("parsed") is not None and isinstance(res["parsed"], self._schema):
                 return res["parsed"]
+
             raw_msg = res.get("raw")
+            # 1. Prioridad: Inspeccionar tool_calls directamente
+            if raw_msg and hasattr(raw_msg, "tool_calls"):
+                recovered_tc = _extract_from_tool_calls(raw_msg.tool_calls, self._schema)
+                if recovered_tc is not None:
+                    return recovered_tc
+
+            # 2. Desempaquetar content limpiando artefactos técnicos
             if raw_msg and hasattr(raw_msg, "content"):
-                recovered = _try_parse_schema_from_text(str(raw_msg.content), self._schema)
+                raw_text = _clean_content_to_text(raw_msg.content)
+                recovered = _try_parse_schema_from_text(raw_text, self._schema)
                 if recovered is not None:
                     return recovered
-                raw_text = str(raw_msg.content).strip()
                 if raw_text and hasattr(self._schema, "model_fields"):
                     fields = self._schema.model_fields
                     if len(fields) == 1:
@@ -147,10 +240,10 @@ class ResilientStructuredOutputRunnable(Runnable):
         if res is None or hasattr(res, "content"):
             content = getattr(res, "content", "") if res is not None else ""
             if content:
-                recovered = _try_parse_schema_from_text(str(content), self._schema)
+                raw_text = _clean_content_to_text(content)
+                recovered = _try_parse_schema_from_text(raw_text, self._schema)
                 if recovered is not None:
                     return recovered
-                raw_text = str(content).strip()
                 if raw_text and hasattr(self._schema, "model_fields"):
                     fields = self._schema.model_fields
                     if len(fields) == 1:

@@ -1,0 +1,20 @@
+services:
+  spark_agent:
+    container_name: spark_agent_dev
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: spark_agent:dev
+    ports:
+      - "2545:8000"
+    env_file:
+      - .env.dev
+    volumes:
+      - .:/app
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped

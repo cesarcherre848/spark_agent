@@ -1,0 +1,16 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.git/
+.gitignore
+.env*
+!.env.dev.example
+collection_bruno/
+.DS_Store
+*.md
+!requirements.txt
+openspec/
