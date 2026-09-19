@@ -7,7 +7,10 @@
     "spark_agent": "./src/agent_service/graph/main_graph.py:get_main_graph",
     "product_resolver": "./src/agent_service/graph/sub_graphs/product_resolver/graph.py:get_product_resolver_graph",
     "product_rag": "./src/agent_service/graph/sub_graphs/product_rag/graph.py:get_product_rag_graph",
-    "user_memory": "./src/agent_service/graph/sub_graphs/user_memory/graph.py:get_user_memory_graph"
+    "user_memory": "./src/agent_service/graph/sub_graphs/user_memory/graph.py:get_user_memory_graph",
+    "contact_manage": "./src/agent_service/graph/sub_graphs/contact_manage/graph.py:get_contact_manage_graph",
+    "sales_manage": "./src/agent_service/graph/sub_graphs/sales_manage/graph.py:get_sales_manage_graph",
+    "product_recomender": "./src/agent_service/graph/sub_graphs/product_recomender/graph.py:get_product_recomender_graph"
   },
   "env": ".env.dev"
 }

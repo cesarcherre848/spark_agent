@@ -1,7 +1,7 @@
 from typing import List, Optional
 from langchain_core.documents import Document
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
+from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, trim_messages
 
 from src.agent_service.core.stores.product.vector_store import ProductVectorStore
 from src.agent_service.core.stores.product.schemas import ProductCatalogFilter
@@ -14,6 +14,7 @@ from src.agent_service.graph.sub_graphs.product_rag.schemas import (
 )
 from src.agent_service.graph.sub_graphs.product_rag.state import ProductRagState
 from src.agent_service.core.llms import bind_temperature, bind_structured_output
+from src.agent_service.soul import inject_soul, SoulRole
 
 
 class ProductRagNodes:
@@ -223,16 +224,23 @@ class ProductRagNodes:
         else:
             candidates_text = "No se encontraron productos coincidentes o autorizados en el catálogo."
 
-        system_prompt = """
-            Eres un asesor comercial para un catálogo de ventas ERP.
+        trimmed_history = trim_messages(
+            state.get("messages", []),
+            max_tokens=10,
+            strategy="last",
+            token_counter=len,
+        )
 
-            Tareas:
-                - Redactar una respuesta cordial, técnica y orientada a la venta.
-                - Si hay productos seleccionados: Recomienda de forma clara las opciones pertinentes, mencionando siempre su NOMBRE y CÓDIGO SKU (ej: '1. **Nombre del Producto** (Código SKU: X): ...'). Explica sus beneficios clave.
-                - Si no hay productos disponibles o is_sufficient es False: Explica amablemente que no disponemos de ese artículo exacto en este momento.
-                - No inventes características, precios ni especificaciones ausentes en los candidatos.
-                - Informa al cliente que si desea cotizar o consultar precios de estas opciones, puede indicar los códigos SKU recomendados.
-        """
+        system_prompt = inject_soul(
+            """
+            Tareas de presentación del catálogo:
+            - Si hay productos seleccionados: Recomienda de forma clara las opciones pertinentes, mencionando siempre su NOMBRE y CÓDIGO SKU oficial (ej: '1. **Nombre del Producto** (Código SKU: [X]): ...'). Explica sus beneficios clave.
+            - Si no hay productos disponibles o is_sufficient es False: Explica amablemente que no disponemos de ese artículo exacto en este momento y sugiere alternativas afines.
+            - No inventes características, precios ni especificaciones ausentes en los candidatos.
+            - Informa con sutileza consultiva al cliente que si desea cotizar o consultar precios de estas opciones, con gusto podemos procesar los códigos SKU recomendados.
+            """,
+            role=SoulRole.CATALOG_RAG,
+        )
 
         user_prompt = f"""
             Consulta del cliente: {raw_query}
@@ -245,6 +253,7 @@ class ProductRagNodes:
 
         messages = [
             SystemMessage(content=system_prompt),
+            *trimmed_history,
             HumanMessage(content=user_prompt),
         ]
 
@@ -252,8 +261,19 @@ class ProductRagNodes:
         final_text = (
             answer.response_text
             if answer and hasattr(answer, "response_text") and answer.response_text
-            else "Aquí tienes las opciones identificadas en nuestro catálogo."
+            else ""
         )
+        if not final_text:
+            if is_sufficient and docs:
+                final_text = (
+                    f"Aquí tienes las opciones identificadas en nuestro catálogo:\n\n{candidates_text}\n\n"
+                    "Si deseas cotizar o consultar disponibilidad de alguno de estos productos, con gusto te ayudo."
+                )
+            else:
+                final_text = (
+                    "No se encontraron productos disponibles en el catálogo que coincidan con tu búsqueda. "
+                    "¿Deseas buscar con otros términos o en otra categoría?"
+                )
 
         return {
             "final_response": final_text,

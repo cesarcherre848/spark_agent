@@ -30,13 +30,145 @@ def bind_temperature(llm: Any, temperature: float) -> Any:
     return llm
 
 
+import json
+import re
+from langchain_core.runnables import Runnable, RunnableConfig
+
+
+def _try_parse_schema_from_text(text: str, schema: Any) -> Optional[Any]:
+    """Extrae y valida un esquema Pydantic desde texto markdown con json o texto plano."""
+    if not text:
+        return None
+    # 1. Buscar bloques ```json ... ```
+    match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    candidate_json = match.group(1) if match else None
+
+    # 2. Si no hay bloque markdown, buscar el primer objeto JSON completo
+    if not candidate_json:
+        match_obj = re.search(r"(\{.*\})", text, re.DOTALL)
+        if match_obj:
+            candidate_json = match_obj.group(1)
+
+    if candidate_json:
+        try:
+            data = json.loads(candidate_json)
+            if hasattr(schema, "model_validate"):
+                return schema.model_validate(data)
+            elif callable(schema):
+                return schema(**data)
+        except Exception as e:
+            logger.debug(f"No se pudo parsear JSON desde texto recuperado: {e}")
+    return None
+
+
+class ResilientStructuredOutputRunnable(Runnable):
+    """Envuelve un modelo estructurado para rescatar JSON emitido en texto plano si no hubo tool_calls."""
+
+    def __init__(self, structured_model: Any, schema: Any):
+        self._structured_model = structured_model
+        self._schema = schema
+
+    async def ainvoke(self, input: Any, config: Optional[RunnableConfig] = None, **kwargs: Any) -> Any:
+        try:
+            res = await self._structured_model.ainvoke(input, config=config, **kwargs)
+        except Exception as e:
+            logger.warning(f"Error en structured_model.ainvoke: {e}; intentando recuperación...")
+            res = None
+
+        if res is not None and isinstance(res, self._schema):
+            return res
+
+        if isinstance(res, dict):
+            if res.get("parsed") is not None and isinstance(res["parsed"], self._schema):
+                return res["parsed"]
+            raw_msg = res.get("raw")
+            if raw_msg and hasattr(raw_msg, "content"):
+                recovered = _try_parse_schema_from_text(str(raw_msg.content), self._schema)
+                if recovered is not None:
+                    logger.info(f"Recuperado exitosamente {getattr(self._schema, '__name__', 'Schema')} desde raw.content")
+                    return recovered
+                raw_text = str(raw_msg.content).strip()
+                if raw_text and hasattr(self._schema, "model_fields"):
+                    fields = self._schema.model_fields
+                    if len(fields) == 1:
+                        fname = next(iter(fields))
+                        try:
+                            return self._schema(**{fname: raw_text})
+                        except Exception:
+                            pass
+
+        if res is None or hasattr(res, "content"):
+            content = getattr(res, "content", "") if res is not None else ""
+            if content:
+                recovered = _try_parse_schema_from_text(str(content), self._schema)
+                if recovered is not None:
+                    logger.info(f"Recuperado exitosamente {getattr(self._schema, '__name__', 'Schema')} desde content")
+                    return recovered
+                raw_text = str(content).strip()
+                if raw_text and hasattr(self._schema, "model_fields"):
+                    fields = self._schema.model_fields
+                    if len(fields) == 1:
+                        fname = next(iter(fields))
+                        try:
+                            return self._schema(**{fname: raw_text})
+                        except Exception:
+                            pass
+
+        return res
+
+    def invoke(self, input: Any, config: Optional[RunnableConfig] = None, **kwargs: Any) -> Any:
+        try:
+            res = self._structured_model.invoke(input, config=config, **kwargs)
+        except Exception as e:
+            logger.warning(f"Error en structured_model.invoke: {e}")
+            res = None
+
+        if res is not None and isinstance(res, self._schema):
+            return res
+
+        if isinstance(res, dict):
+            if res.get("parsed") is not None and isinstance(res["parsed"], self._schema):
+                return res["parsed"]
+            raw_msg = res.get("raw")
+            if raw_msg and hasattr(raw_msg, "content"):
+                recovered = _try_parse_schema_from_text(str(raw_msg.content), self._schema)
+                if recovered is not None:
+                    return recovered
+                raw_text = str(raw_msg.content).strip()
+                if raw_text and hasattr(self._schema, "model_fields"):
+                    fields = self._schema.model_fields
+                    if len(fields) == 1:
+                        fname = next(iter(fields))
+                        try:
+                            return self._schema(**{fname: raw_text})
+                        except Exception:
+                            pass
+
+        if res is None or hasattr(res, "content"):
+            content = getattr(res, "content", "") if res is not None else ""
+            if content:
+                recovered = _try_parse_schema_from_text(str(content), self._schema)
+                if recovered is not None:
+                    return recovered
+                raw_text = str(content).strip()
+                if raw_text and hasattr(self._schema, "model_fields"):
+                    fields = self._schema.model_fields
+                    if len(fields) == 1:
+                        fname = next(iter(fields))
+                        try:
+                            return self._schema(**{fname: raw_text})
+                        except Exception:
+                            pass
+
+        return res
+
+
 def bind_structured_output(llm: Any, schema: Any, **kwargs: Any) -> Any:
     """Vincula una salida estructurada de manera robusta y compatible entre proveedores y mocks.
 
     Para modelos ChatGoogleGenerativeAI (especialmente variantes con razonamiento como
-    gemini-3-flash-preview), utiliza method='json_mode' por defecto a menos que se
-    especifique otro, garantizando que el modelo procese el esquema sin emitir JSON en texto plano
-    que provoque un resultado None por falta de tool_calls.
+    gemini-3-flash-preview), emplea include_raw=True y un wrapper resiliente que rescata
+    el JSON si el modelo lo emite en content en lugar de tool_calls.
     Para mocks de pruebas unitarias, tolera firmas de mocks que no acepten kwargs.
     """
     if "unittest.mock" in type(llm).__module__:
@@ -48,11 +180,22 @@ def bind_structured_output(llm: Any, schema: Any, **kwargs: Any) -> Any:
         return llm
 
     underlying = getattr(llm, "bound", llm)
+    model_str = str(getattr(underlying, "model", "")).lower()
+    # Para Gemini 3 (ej. gemini-3-flash-preview), Google optimizó el uso de function_calling nativo;
+    # 'json_mode' en Gemini 3 produce cuellos de botella y 504 Deadline Exceeded en los servidores de Google.
     if "ChatGoogleGenerativeAI" in underlying.__class__.__name__ and "method" not in kwargs:
-        kwargs["method"] = "json_mode"
+        if "gemini-3" in model_str:
+            pass  # Emplea function_calling nativo (estable, sin timeouts y < 10s)
+        else:
+            kwargs["method"] = "json_mode"
 
     if hasattr(llm, "with_structured_output"):
-        return llm.with_structured_output(schema, **kwargs)
+        try:
+            structured_runnable = llm.with_structured_output(schema, include_raw=True, **kwargs)
+            return ResilientStructuredOutputRunnable(structured_runnable, schema)
+        except TypeError:
+            structured_runnable = llm.with_structured_output(schema, **kwargs)
+            return ResilientStructuredOutputRunnable(structured_runnable, schema)
     return llm
 
 
@@ -101,6 +244,8 @@ def create_chat_model(
             "model": target_model,
             "google_api_key": target_key,
             "temperature": target_temp,
+            "max_retries": 2,
+            "timeout": 25.0,
             **kwargs,
         }
         if target_max_tokens is not None:

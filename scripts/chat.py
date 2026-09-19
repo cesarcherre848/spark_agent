@@ -31,6 +31,7 @@ from dotenv import load_dotenv
 # Cargar variables de entorno antes de importar módulos internos
 load_dotenv(PROJECT_ROOT / ".env.dev")
 
+from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.types import Command
 
@@ -80,19 +81,24 @@ def print_banner(model_name: str, provider: str, user_id: int, thread_id: str, d
 def print_help():
     """Muestra la guía de uso y ejemplos prácticos."""
     print(f"\n{Colors.YELLOW}{Colors.BOLD}📖 GUÍA DE USO Y EJEMPLOS DE SPARK AGENT:{Colors.RESET}")
-    print(f"  El agente integra Router inteligente, Memoria semántica (pgvector), RAG y Odoo ERP.")
+    print(f"  El agente integra Router inteligente, Memoria semántica (pgvector), RAG, Cartera de Clientes y Odoo ERP.")
     print(f"\n  {Colors.BOLD}1. Charla general y orientación (General Chat):{Colors.RESET}")
     print(f"     > {Colors.CYAN}¡Hola! ¿En qué puedes ayudarme?{Colors.RESET}")
     print(f"\n  {Colors.BOLD}2. Exploración y recomendación semántica de catálogo (Product RAG):{Colors.RESET}")
     print(f"     > {Colors.CYAN}¿Qué cremas faciales o lociones hidratantes tienen?{Colors.RESET}")
     print(f"     > {Colors.CYAN}Recomiéndame productos desmaquilladores{Colors.RESET}")
-    print(f"\n  {Colors.BOLD}3. Cotizaciones y pedidos directos (Product Resolver & ERP):{Colors.RESET}")
-    print(f"     > {Colors.CYAN}Cotízame 5 unidades del SKU 1{Colors.RESET}")
-    print(f"     > {Colors.CYAN}Necesito 10 unidades del SKU 1 con Unique S.A. y 2 del SKU 11{Colors.RESET}")
-    print(f"\n  {Colors.BOLD}4. Resolución interactiva Human-in-the-Loop (HITL):{Colors.RESET}")
-    print(f"     > {Colors.CYAN}Hola, quiero hacer un pedido de productos{Colors.RESET} (pedirá los SKUs)")
-    print(f"     > {Colors.CYAN}Cotízame 2 unidades del SKU 1{Colors.RESET} (desambiguará proveedor si aplica)")
-    print(f"\n  {Colors.BOLD}5. Memoria semántica a largo plazo:{Colors.RESET}")
+    print(f"\n  {Colors.BOLD}3. Consulta de precios y SKUs (Product Resolver):{Colors.RESET}")
+    print(f"     > {Colors.CYAN}Precio del SKU 1 y disponibilidad de Unique{Colors.RESET}")
+    print(f"\n  {Colors.BOLD}4. Gestión de cartera comercial de clientes (Contact Manage):{Colors.RESET}")
+    print(f"     > {Colors.CYAN}Muéstrame mi cartera de clientes{Colors.RESET}")
+    print(f"     > {Colors.CYAN}Agrega al cliente Inversiones Alfa con teléfono 987654321{Colors.RESET}")
+    print(f"\n  {Colors.BOLD}5. Ciclo de ventas, cotizaciones y pedidos (Sales Manage):{Colors.RESET}")
+    print(f"     > {Colors.CYAN}Muéstrame mis pedidos y cotizaciones de este mes{Colors.RESET}")
+    print(f"     > {Colors.CYAN}Cotízale 5 unidades del SKU 1 a Carlos{Colors.RESET}")
+    print(f"     > {Colors.CYAN}Confirma la cotización SO001{Colors.RESET}")
+    print(f"     > {Colors.CYAN}Cambia la cantidad del pedido confirmado SO002 a 10 unidades{Colors.RESET}")
+    print(f"     > {Colors.CYAN}Cancela la orden SO003{Colors.RESET}")
+    print(f"\n  {Colors.BOLD}6. Memoria semántica a largo plazo:{Colors.RESET}")
     print(f"     > {Colors.CYAN}/memory{Colors.RESET} (consulta las cotizaciones y preferencias registradas)\n")
 
 
@@ -122,10 +128,14 @@ async def handle_interrupt(
     if current_line.strip():
         print(f"{Colors.YELLOW}│{Colors.RESET}{current_line:<66}{Colors.YELLOW}│{Colors.RESET}")
 
-    # Mostrar opciones si es un conflicto de partners
-    options = interrupt_payload.get("options", [])
+    # Mostrar opciones o candidatos si existen
+    options = interrupt_payload.get("options") or interrupt_payload.get("candidate_orders") or []
     if options:
-        print(f"{Colors.YELLOW}│{Colors.RESET}   {Colors.BOLD}Opciones de proveedor (ID):{Colors.RESET} {', '.join(map(str, options)):<34}{Colors.YELLOW}│{Colors.RESET}")
+        print(f"{Colors.YELLOW}│{Colors.RESET}{' ' * 66}{Colors.YELLOW}│{Colors.RESET}")
+        print(f"{Colors.YELLOW}│{Colors.RESET}   {Colors.BOLD}Opciones disponibles:{Colors.RESET}{' ' * 42}{Colors.YELLOW}│{Colors.RESET}")
+        for opt in options:
+            opt_str = f"   • {opt}"
+            print(f"{Colors.YELLOW}│{Colors.RESET}{opt_str:<66}{Colors.YELLOW}│{Colors.RESET}")
 
     print(f"{Colors.YELLOW}{'└' + '─' * 66 + '┘'}{Colors.RESET}")
 
@@ -271,6 +281,7 @@ async def chat_loop(user_id: int = 5, debug: bool = False):
                     "raw_query": user_input,
                     "user_id": current_user_id,
                     "session_id": current_thread_id,
+                    "messages": [HumanMessage(content=user_input)],
                 },
                 config=config,
             )

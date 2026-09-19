@@ -53,10 +53,22 @@ def test_router_decision_schema_valid():
     decision_resolver = RouterDecision(intent="resolver", reasoning="Solicita cotización de SKU 1")
     assert decision_resolver.intent == "resolver"
 
+    decision_contact = RouterDecision(intent="contact", reasoning="Pide ver su cartera de clientes")
+    assert decision_contact.intent == "contact"
+
+    decision_sales = RouterDecision(intent="sales", reasoning="Pide consultar o gestionar órdenes de venta")
+    assert decision_sales.intent == "sales"
+
+    decision_recommender = RouterDecision(intent="recommender", reasoning="Pide recomendaciones cruzadas o complementarias")
+    assert decision_recommender.intent == "recommender"
+
 
 def test_route_after_router_helper():
     assert _route_after_router({"intent": "rag"}) == "product_rag"
+    assert _route_after_router({"intent": "recommender"}) == "product_recomender"
     assert _route_after_router({"intent": "resolver"}) == "product_resolver"
+    assert _route_after_router({"intent": "contact"}) == "contact_manage"
+    assert _route_after_router({"intent": "sales"}) == "sales_manage"
     assert _route_after_router({"intent": "general"}) == "general_chat"
     assert _route_after_router({}) == "general_chat"
 
@@ -116,6 +128,26 @@ async def test_create_router_node_resolver(mock_llm):
 
     result = await router_fn(state)
     assert result["intent"] == "resolver"
+
+
+@pytest.mark.asyncio
+async def test_create_router_node_contact(mock_llm):
+    mock_llm.ainvoke.return_value = RouterDecision(
+        intent="contact",
+        reasoning="El vendedor solicita listar los clientes asignados a su cartera",
+    )
+    router_fn = create_router_node(mock_llm)
+
+    state = {
+        "raw_query": "muéstrame mis clientes en Odoo",
+        "messages": [HumanMessage(content="muéstrame mis clientes en Odoo")],
+        "user_id": 5,
+    }
+
+    result = await router_fn(state)
+    assert result["intent"] == "contact"
+    assert "cartera" in result["intent_reasoning"]
+    assert result["raw_query"] == "muéstrame mis clientes en Odoo"
 
 
 # ==============================================================================
@@ -373,3 +405,116 @@ async def test_build_main_graph_flow_contextual_pricing(mock_memory_store):
 
     assert result["intent"] == "resolver"
     assert "Precios en Odoo ERP para SKUs ['1', '11']" in result["final_response"]
+
+
+@pytest.mark.asyncio
+async def test_build_main_graph_flow_contact(mock_memory_store):
+    """Verifica que consultas relacionadas con la cartera de clientes se enruten al subgrafo contact_manage."""
+    router_mock = MagicMock(spec=BaseChatModel)
+    router_mock.bind = MagicMock(return_value=router_mock)
+    router_mock.with_structured_output = MagicMock(return_value=router_mock)
+    router_mock.ainvoke = AsyncMock(return_value=RouterDecision(
+        intent="contact",
+        reasoning="Petición para listar clientes asignados",
+    ))
+
+    builder_contact = StateGraph(MainGraphState)
+    builder_contact.add_node(
+        "contact_exec",
+        lambda s: {
+            "final_response": "Tienes 3 clientes registrados en tu cartera de Odoo.",
+            "contact_action": "list",
+        },
+    )
+    builder_contact.add_edge(START, "contact_exec")
+    builder_contact.add_edge("contact_exec", END)
+    dummy_contact = builder_contact.compile()
+
+    dummy_resolver_builder = StateGraph(MainGraphState)
+    dummy_resolver_builder.add_node("noop_res", lambda s: {})
+    dummy_resolver_builder.add_edge(START, "noop_res")
+    dummy_resolver_builder.add_edge("noop_res", END)
+    dummy_resolver = dummy_resolver_builder.compile()
+
+    dummy_rag_builder = StateGraph(MainGraphState)
+    dummy_rag_builder.add_node("noop_rag", lambda s: {})
+    dummy_rag_builder.add_edge(START, "noop_rag")
+    dummy_rag_builder.add_edge("noop_rag", END)
+    dummy_rag = dummy_rag_builder.compile()
+
+    combined_llm = MagicMock(spec=BaseChatModel)
+    combined_llm.bind = MagicMock(side_effect=lambda **kw: router_mock)
+
+    app = build_main_graph(
+        llm=combined_llm,
+        resolver_graph=dummy_resolver,
+        rag_graph=dummy_rag,
+        contact_graph=dummy_contact,
+        memory_store=mock_memory_store,
+        checkpointer=MemorySaver(),
+    )
+
+    config = {"configurable": {"thread_id": "thread-contact-routing"}}
+    result = await app.ainvoke(
+        {
+            "raw_query": "muéstrame mis clientes",
+            "user_id": 5,
+            "messages": [HumanMessage(content="muéstrame mis clientes")],
+        },
+        config=config,
+    )
+
+    assert result["intent"] == "contact"
+    assert "Tienes 3 clientes registrados" in result["final_response"]
+
+
+@pytest.mark.asyncio
+async def test_main_graph_routes_to_sales_manage(mock_memory_store):
+    """Verifica que el Router derive a sales_manage cuando la intención es 'sales'."""
+    router_mock = MagicMock(spec=BaseChatModel)
+    router_mock.with_structured_output = MagicMock(
+        return_value=AsyncMock(
+            ainvoke=AsyncMock(
+                return_value=RouterDecision(
+                    intent="sales",
+                    reasoning="El usuario solicita ver sus órdenes de venta",
+                )
+            )
+        )
+    )
+
+    builder_sales = StateGraph(MainGraphState)
+    builder_sales.add_node(
+        "sales_exec",
+        lambda s: {
+            "final_response": "Tienes 2 cotizaciones activas en Odoo.",
+            "sales_action": "list",
+        },
+    )
+    builder_sales.add_edge(START, "sales_exec")
+    builder_sales.add_edge("sales_exec", END)
+    dummy_sales = builder_sales.compile()
+
+    combined_llm = MagicMock(spec=BaseChatModel)
+    combined_llm.bind = MagicMock(side_effect=lambda **kw: router_mock)
+
+    app = build_main_graph(
+        llm=combined_llm,
+        sales_graph=dummy_sales,
+        memory_store=mock_memory_store,
+        checkpointer=MemorySaver(),
+    )
+
+    config = {"configurable": {"thread_id": "thread-sales-routing"}}
+    result = await app.ainvoke(
+        {
+            "raw_query": "muéstrame mis pedidos y cotizaciones",
+            "user_id": 5,
+            "messages": [HumanMessage(content="muéstrame mis pedidos y cotizaciones")],
+        },
+        config=config,
+    )
+
+    assert result["intent"] == "sales"
+    assert "Tienes 2 cotizaciones activas" in result["final_response"]
+

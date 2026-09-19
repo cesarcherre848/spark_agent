@@ -21,6 +21,7 @@ from src.agent_service.tools.product_tools import (
 )
 
 from src.agent_service.core.llms import bind_temperature, bind_structured_output
+from src.agent_service.soul import inject_soul, SoulRole
 
 logger = logging.getLogger(__name__)
 
@@ -414,15 +415,14 @@ class ProductResolverNodes:
 
         context_text = "\n".join(lines) if lines else "No se cotizaron productos específicos en este turno."
 
-        system_prompt = """
-            Eres un asesor comercial experto en ERP para consolidación de pedidos multimarca y catálogo comercial.
-
-            Tareas:
-                - Redactar una respuesta clara, profesional, servicial y estructurada para el cliente.
-                - Si hay productos cotizados por proveedor: Organízalos claramente por proveedor con cantidades, precios unitarios y subtotales.
-                - Si no hay productos cotizados (ej. el cliente hizo una pregunta, solicitó códigos o la información fue insuficiente para cotizar): Responde con amabilidad aclarando sus dudas a partir del historial, indícale los códigos SKU disponibles si los conoces o explícale con claridad cómo puede solicitarlos para cotizar.
-                - Mantener un tono servicial y cordial.
-        """
+        system_prompt = inject_soul(
+            """
+            Tareas de cotización multimarca:
+            - Si hay productos cotizados por proveedor: Organízalos claramente por proveedor con cantidades, precios unitarios y subtotales en formato limpio y estructurado.
+            - Si no hay productos cotizados (ej. el cliente hizo una pregunta, solicitó códigos o la información fue insuficiente para cotizar): Responde con amabilidad aclarando sus dudas a partir del historial, indícale los códigos SKU disponibles si los conoces o explícale con claridad cómo puede solicitarlos para cotizar.
+            """,
+            role=SoulRole.QUOTATION,
+        )
 
         matched_skus = state.get("matched_skus", [])
         skus_hint = f"\nCódigos SKU sugeridos previamente en la conversación: {', '.join(map(str, matched_skus))}\n" if matched_skus else ""
@@ -430,7 +430,7 @@ class ProductResolverNodes:
         user_prompt = f"""
             Solicitud o consulta del cliente: {raw_query}
             {skus_hint}
-            Productos cotizados por proveedor en Odoo ERP:
+            Productos cotizados por proveedor:
             {context_text}
         """
 
