@@ -1,0 +1,33 @@
+schema: spec-driven
+
+# Project context
+context: |
+  Project: spark_agent
+  Tech stack: Python 3.9+, LangGraph, LangChain, Pydantic v2, PostgreSQL (pgvector, psycopg-pool), Pytest.
+  Domain: Multi-agent conversational system for customer service, product catalog retrieval (RAG), sales management, and CRM (Odoo).
+  Conventions:
+    - Planning boundary: Do not modify source code or tests during proposal/planning workflows.
+    - Test runner: Run unit tests with `.venv/bin/pytest -m "not real_db"`.
+    - Architecture: LangGraph multi-agent graph with modular subgraphs in `src/agent_service/graph/`.
+
+# Per-artifact rules (optional)
+# Add custom rules for specific artifacts.
+# Example:
+#   rules:
+#     proposal:
+#       - Keep proposals under 500 words
+#       - Always include a "Non-goals" section
+#     tasks:
+#       - Break tasks into chunks of max 2 hours
+
+# Per-operation guidance (optional)
+# Add advisory guidance for how apply and archive work should be conducted.
+# This is separate from artifact rules above.
+# Example:
+#   operations:
+#     apply:
+#       guidance:
+#         - Keep test summaries concise
+#     archive:
+#       guidance:
+#         - Summarize the archive outcome before finishing
