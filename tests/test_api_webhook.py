@@ -511,3 +511,106 @@ async def test_unauthorized_phone_returns_401_without_invoking_graph():
     finally:
         app.dependency_overrides.clear()
 
+
+def test_webhook_response_schema_sanitizes_stringified_gemini_dict():
+    """Valida que WebhookResponse sanitice automáticamente cadenas serializadas con firmas de Gemini."""
+    raw_payload = (
+        "{'type': 'text', 'text': 'Hola, ¡muy bien! Es un gusto saludarte. Soy **MIA**, tu asistente comercial. 💼\\n\\n"
+        "¿En qué puedo ayudarte hoy?', 'extras': {'signature': 'EscQCsQQAWkUfRO3cn978Cf3sx2ELf0aB2H1ZFQQTC1CFZ/wrGFzKw5pbowpcV3uneF=='}}"
+    )
+    resp = WebhookResponse(
+        status="success",
+        user_id=5,
+        phone_number="+51983689215",
+        session_id="test_session_1",
+        intent="general",
+        response=raw_payload,
+        is_topic_finished=False,
+    )
+    assert "extras" not in resp.response
+    assert "signature" not in resp.response
+    assert "EscQCsQQ" not in resp.response
+    assert not resp.response.startswith("{")
+    assert not resp.response.endswith("}")
+    assert "Hola, ¡muy bien! Es un gusto saludarte. Soy **MIA**, tu asistente comercial. 💼" in resp.response
+    assert "¿En qué puedo ayudarte hoy?" in resp.response
+
+
+def test_webhook_response_schema_sanitizes_gemini_dict_object():
+    """Valida que WebhookResponse soporte y desempaquete diccionarios de Gemini en memoria."""
+    raw_dict = {
+        "type": "text",
+        "text": "Aquí tienes los precios solicitados.",
+        "extras": {"signature": "crypto_sig_abc123"},
+    }
+    resp = WebhookResponse(
+        status="success",
+        user_id=5,
+        phone_number="+51983689215",
+        session_id="test_session_2",
+        intent="resolver",
+        response=raw_dict,
+        is_topic_finished=False,
+    )
+    assert resp.response == "Aquí tienes los precios solicitados."
+
+
+def test_webhook_response_schema_strips_thought_blocks():
+    """Valida que los bloques de razonamiento interno ('thought') sean descartados."""
+    block_list = [
+        {"type": "thought", "thought": "Pensando en la estrategia de venta y buscando en memoria..."},
+        {"type": "text", "text": "¡Por supuesto! Tenemos stock disponible para entrega inmediata."},
+    ]
+    resp = WebhookResponse(
+        status="success",
+        user_id=5,
+        phone_number="+51983689215",
+        session_id="test_session_3",
+        intent="general",
+        response=block_list,
+        is_topic_finished=False,
+    )
+    assert "Pensando" not in resp.response
+    assert resp.response == "¡Por supuesto! Tenemos stock disponible para entrega inmediata."
+
+
+@pytest.mark.asyncio
+async def test_webhook_endpoint_sanitizes_gemini_thought_signatures():
+    """Valida end-to-end que el webhook HTTP entregue exclusivamente texto plano ante respuestas con firmas de Gemini."""
+    dirty_gemini_output = (
+        "{'type': 'text', 'text': 'Hola, ¡muy bien! Es un gusto saludarte. Soy **MIA**.', "
+        "'extras': {'signature': 'EscQCsQQAWkUfRO3cn978Cf3sx2ELf0aB2H1ZFQQTC1CFZ/=='}}"
+    )
+    mock_graph = AsyncMock()
+    mock_graph.ainvoke.return_value = {
+        "final_response": dirty_gemini_output,
+        "intent": "general",
+        "is_topic_finished": False,
+    }
+
+    mock_resolver = AsyncMock()
+    mock_resolver.resolve_user_id.return_value = 5
+
+    app.dependency_overrides[get_agent_graph] = lambda: mock_graph
+    app.dependency_overrides[get_phone_user_resolver] = lambda: mock_resolver
+
+    try:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/api/v1/webhook",
+                json={
+                    "phone": "51983689215",
+                    "raw_query": "Hola, ¿cómo estás?",
+                },
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["status"] == "success"
+            assert data["response"] == "Hola, ¡muy bien! Es un gusto saludarte. Soy **MIA**."
+            assert "signature" not in str(data)
+            assert "extras" not in str(data)
+    finally:
+        app.dependency_overrides.clear()
+
+

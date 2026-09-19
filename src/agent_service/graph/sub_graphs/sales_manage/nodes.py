@@ -14,6 +14,7 @@ from langchain_core.runnables.config import var_child_runnable_config
 from langgraph.types import interrupt
 
 from src.agent_service.core.llms import bind_temperature, bind_structured_output
+from src.agent_service.core.llms.factory import extract_clean_text
 from src.agent_service.soul import inject_soul, SoulRole
 from src.agent_service.graph.sub_graphs.sales_manage.state import SalesManageState
 from src.agent_service.graph.sub_graphs.sales_manage.schemas import (
@@ -1096,9 +1097,10 @@ class SalesManageNodes:
             try:
                 # Intento de recuperación con invocación directa al LLM
                 direct_msg = await self._llm.ainvoke(messages)
-                content_text = getattr(direct_msg, "content", "")
-                if content_text and str(content_text).strip():
-                    synth_result = SalesSynthesizeResponse(response_text=str(content_text).strip())
+                content_text = extract_clean_text(getattr(direct_msg, "content", ""))
+                if content_text:
+                    synth_result = SalesSynthesizeResponse(response_text=content_text)
+
             except Exception as e2:
                 logger.warning(f"Error en recuperación directa de síntesis: {e2}")
 

@@ -49,6 +49,11 @@ def clean_text_from_tool_call_artifacts(text: str) -> str:
             if isinstance(parsed, list):
                 parts = []
                 for item in parsed:
+                    if isinstance(item, dict):
+                        sub_t = extract_clean_text(item)
+                        if sub_t:
+                            parts.append(sub_t)
+                        continue
                     s = str(item).strip()
                     if s.startswith("call:") or s.startswith("default_api:") or s in ("}", ")", "]", "{"):
                         continue
@@ -75,6 +80,99 @@ def clean_text_from_tool_call_artifacts(text: str) -> str:
             return candidate
 
     return stripped
+
+
+def extract_clean_text(content: Any) -> str:
+    """Extrae texto conversacional plano y limpio de cualquier formato emitido por LLMs o LangGraph.
+
+    Procesa de forma resiliente:
+    - Cadenas planas normales.
+    - Diccionarios de bloques Gemini: {'type': 'text', 'text': '...', 'extras': {'signature': '...'}}.
+    - Listas de bloques emitidas por ChatGoogleGenerativeAI: [{'type': 'text', 'text': '...'}, ...].
+    - Omitir bloques de razonamiento interno: {'type': 'thought', ...}.
+    - Cadenas de texto que representan listas o diccionarios serializados (ast.literal_eval, json.loads).
+    - Fallback regex para extraer el campo 'text' ante cadenas complejas o malformadas.
+    - Sanitización de prefijos de Function Calling (call:default_api:...).
+    """
+    if content is None:
+        return ""
+
+    # Caso 1: Diccionario (bloques estructurados de Gemini / LangChain)
+    if isinstance(content, dict):
+        if content.get("type") == "thought":
+            return ""
+        for key in ("text", "content", "response_text"):
+            if key in content and content[key]:
+                return extract_clean_text(content[key])
+        return ""
+
+    # Caso 2: Lista (bloques múltiples de contenido o partes de respuesta)
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, str):
+                s = item.strip()
+                if s.startswith("call:") or s.startswith("default_api:") or s in ("}", ")", "]", "{"):
+                    continue
+            t = extract_clean_text(item)
+            if t:
+                parts.append(t)
+        return "\n".join(parts).strip()
+
+    # Caso 3: String
+    if isinstance(content, str):
+        # 1. Si contiene artefactos técnicos de Function Calling, limpiarlos primero
+        cleaned_art = clean_text_from_tool_call_artifacts(content)
+        if cleaned_art != content:
+            return extract_clean_text(cleaned_art)
+
+        stripped = content.strip()
+        if not stripped:
+            return ""
+
+        if stripped.startswith("call:") or stripped.startswith("default_api:") or stripped in ("}", ")", "]", "{"):
+            return ""
+
+        # Si parece una estructura serializada de Python o JSON (empieza y termina con { o [)
+        if (stripped.startswith("{") and stripped.endswith("}")) or (stripped.startswith("[") and stripped.endswith("]")):
+            try:
+                parsed = ast.literal_eval(stripped)
+                extracted = extract_clean_text(parsed)
+                if extracted:
+                    return extracted
+            except Exception:
+                pass
+
+            try:
+                parsed = json.loads(stripped)
+                extracted = extract_clean_text(parsed)
+                if extracted:
+                    return extracted
+            except Exception:
+                pass
+
+        # Fallback regex para diccionarios con 'text': '...'
+        m_dict = re.search(
+            r"['\"]text['\"]\s*:\s*['\"](.*?)['\"](?:\s*,\s*['\"]extras['\"]|\s*\}\s*$)",
+            stripped,
+            re.DOTALL,
+        )
+        if m_dict:
+            candidate = m_dict.group(1)
+            try:
+                candidate = candidate.encode().decode("unicode_escape")
+            except Exception:
+                pass
+            clean_cand = clean_text_from_tool_call_artifacts(candidate.strip())
+            if clean_cand:
+                return clean_cand
+
+        return clean_text_from_tool_call_artifacts(stripped)
+
+    # Fallback general
+    return clean_text_from_tool_call_artifacts(str(content).strip())
+
+
 
 
 def _try_parse_schema_from_text(text: str, schema: Any) -> Optional[Any]:
@@ -123,18 +221,9 @@ def _extract_from_tool_calls(tool_calls: Any, schema: Any) -> Optional[Any]:
 
 
 def _clean_content_to_text(content_val: Any) -> str:
-    """Extrae texto limpio a partir de content_val, ya sea str o list."""
-    if isinstance(content_val, list):
-        parts = []
-        for item in content_val:
-            s = str(item).strip()
-            if s.startswith("call:") or s.startswith("default_api:") or s in ("}", ")", "]", "{"):
-                continue
-            parts.append(s)
-        text = "\n".join(parts).strip() if parts else str(content_val)
-    else:
-        text = str(content_val or "").strip()
-    return clean_text_from_tool_call_artifacts(text)
+    """Extrae texto limpio a partir de content_val, ya sea str, list o dict estructurado."""
+    return extract_clean_text(content_val)
+
 
 
 class ResilientStructuredOutputRunnable(Runnable):

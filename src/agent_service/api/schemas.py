@@ -2,8 +2,9 @@
 src/agent_service/api/schemas.py - Modelos Pydantic v2 para el Webhook de Spark Agent
 """
 
-from typing import Optional
+from typing import Optional, Any
 from pydantic import BaseModel, Field, AliasChoices, field_validator
+
 
 
 class WebhookRequest(BaseModel):
@@ -56,3 +57,14 @@ class WebhookResponse(BaseModel):
         default=False,
         description="Indica si la interacción o transacción actual ha concluido.",
     )
+
+    @field_validator("response", mode="before")
+    @classmethod
+    def ensure_clean_conversational_text(cls, v: Any) -> str:
+        """Garantiza que la respuesta sea exclusivamente texto conversacional plano y limpio."""
+        from src.agent_service.core.llms.factory import extract_clean_text
+        clean = extract_clean_text(v)
+        if not clean and v:
+            clean = str(v).strip()
+        return clean
+

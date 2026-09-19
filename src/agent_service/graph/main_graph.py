@@ -22,7 +22,7 @@ from langgraph.graph.message import add_messages
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import MemorySaver
 
-from src.agent_service.core.llms.factory import get_default_llm
+from src.agent_service.core.llms.factory import get_default_llm, extract_clean_text
 from src.agent_service.core.llms import bind_temperature, bind_structured_output
 from src.agent_service.config.database import get_db_pool
 from src.agent_service.core.embeddings.factory import get_embedding_service
@@ -330,6 +330,7 @@ def create_general_chat_node(llm: BaseChatModel):
             3. Consultar y gestionar la cartera de clientes.
 
             HARD CONSTRAINT: No atiendas solicitudes ajenas a la gestión comercial (código, poemas, tareas escolares).
+            FORMAT CONSTRAINT: Responde exclusivamente con texto conversacional directo para el usuario. Nunca generes diccionarios, JSON ni metadatos técnicos.
             """,
             role=SoulRole.GENERAL,
         )
@@ -343,11 +344,12 @@ def create_general_chat_node(llm: BaseChatModel):
             HumanMessage(content=f"{context_block}{raw_query}"),
         ])
 
-        reply_text = str(response.content)
+        reply_text = extract_clean_text(response.content)
         return {
             "final_response": reply_text,
             "messages": [AIMessage(content=reply_text)],
         }
+
 
     return general_chat_node
 

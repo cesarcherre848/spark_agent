@@ -16,7 +16,7 @@ from src.agent_service.api.service import (
 )
 from src.agent_service.graph.main_graph import get_main_graph
 from src.agent_service.config.database import close_db_pool
-from src.agent_service.core.llms.factory import clean_text_from_tool_call_artifacts
+from src.agent_service.core.llms.factory import clean_text_from_tool_call_artifacts, extract_clean_text
 
 load_dotenv(".env.dev")
 
@@ -136,7 +136,7 @@ async def process_webhook(
         if messages and hasattr(messages[-1], "content"):
             raw_final_response = messages[-1].content
 
-    final_response = clean_text_from_tool_call_artifacts(str(raw_final_response))
+    final_response = extract_clean_text(raw_final_response)
 
     intent = result.get("intent")
     is_topic_finished = bool(result.get("is_topic_finished", False))

@@ -18,6 +18,7 @@ from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, trim
 from langchain_core.documents import Document
 
 from src.agent_service.core.llms import bind_temperature, bind_structured_output
+from src.agent_service.core.llms.factory import extract_clean_text
 from src.agent_service.core.stores.product.vector_store import ProductVectorStore
 from src.agent_service.core.stores.product.schemas import ProductCatalogFilter
 from src.agent_service.core.stores.product.odoo_client import OdooClient
@@ -461,7 +462,7 @@ class ProductRecomenderNodes:
             SystemMessage(content=system_prompt),
             HumanMessage(content=user_content),
         ])
-        new_query = str(resp.content).strip().strip('"').strip("'")
+        new_query = extract_clean_text(resp.content).strip().strip('"').strip("'")
         if not new_query:
             new_query = old_query
 
