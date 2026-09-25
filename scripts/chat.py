@@ -197,6 +197,13 @@ async def chat_loop(user_id: int = 5, debug: bool = False):
         checkpointer=checkpointer,
     )
 
+    # Precargar modelo Laya para Guardrails (evita cold-start / latencia en el primer mensaje)
+    try:
+        from src.agent_service.core.guardrails.laya_client import get_laya_agent
+        get_laya_agent()
+    except Exception:
+        pass
+
     current_user_id = user_id
     current_thread_id = f"cli-{uuid.uuid4().hex[:8]}"
 

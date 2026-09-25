@@ -44,6 +44,14 @@ async def lifespan(app: FastAPI):
         get_agent_graph()
     except Exception as e:
         logger.warning(f"No fue posible pre-cargar el grafo al iniciar: {e}")
+
+    # Precargar modelo Laya para Guardrails (evita cold-start en el primer mensaje)
+    try:
+        from src.agent_service.core.guardrails.laya_client import get_laya_agent
+        logger.info("Precargando modelo Laya para Guardrails...")
+        get_laya_agent()
+    except Exception as e:
+        logger.warning(f"No fue posible precargar el modelo Laya al iniciar: {e}")
     yield
     logger.info("Cerrando recursos de Spark Agent...")
     try:
