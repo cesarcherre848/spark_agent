@@ -111,7 +111,13 @@ class ProductResolverNodes:
         if extraction is None:
             extraction = ExtractionResult(is_complete=False, missing_info_prompt="Por favor especifica el código SKU o detalles de los productos que deseas cotizar.")
         elif isinstance(extraction, dict):
-            extraction = ExtractionResult(**extraction)
+            try:
+                valid_keys = ExtractionResult.model_fields.keys()
+                clean_kwargs = {k: v for k, v in extraction.items() if k in valid_keys and v is not None}
+                extraction = ExtractionResult(**clean_kwargs)
+            except Exception as exc:
+                logger.warning(f"[ProductResolver] Error parseando dict de extracción ({exc}). Usando fallback.")
+                extraction = ExtractionResult(is_complete=False, missing_info_prompt="Por favor especifica los productos a cotizar.")
 
         items: Dict[str, SKUItem] = {}
 

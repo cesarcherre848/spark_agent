@@ -141,7 +141,17 @@ class ProductRagNodes:
                 critique="Evaluación completada por disponibilidad de catálogo.",
             )
         elif isinstance(evaluation, dict):
-            evaluation = EvaluationResult(**evaluation)
+            try:
+                valid_keys = EvaluationResult.model_fields.keys()
+                clean_kwargs = {k: v for k, v in evaluation.items() if k in valid_keys and v is not None}
+                evaluation = EvaluationResult(**clean_kwargs)
+            except Exception as exc:
+                logger.warning(f"[ProductRAG] Error parseando dict de evaluación ({exc}). Usando fallback.")
+                evaluation = EvaluationResult(
+                    is_sufficient=len(docs) > 0,
+                    selected_indices=list(range(1, min(len(docs) + 1, 4))),
+                    critique="Evaluación completada por disponibilidad de catálogo.",
+                )
 
         selected_indices = getattr(evaluation, "selected_indices", []) or []
         is_sufficient = getattr(evaluation, "is_sufficient", False)

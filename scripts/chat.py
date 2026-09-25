@@ -13,6 +13,7 @@ warnings.simplefilter("ignore")
 
 import os
 os.environ["PYTHONWARNINGS"] = "ignore"
+import re
 import sys
 import time
 import uuid
@@ -211,6 +212,9 @@ async def chat_loop(user_id: int = 5, debug: bool = False):
         try:
             prompt_label = f"{Colors.BOLD}{Colors.BLUE}[Usuario (ID: {current_user_id})] > {Colors.RESET}"
             user_input = input(prompt_label).strip()
+            # Sanitizar prefijos residuales de consola si el usuario copió y pegó desde el terminal
+            user_input = re.sub(r"^(\s*\[Usuario[^\]]*\]\s*>\s*)+", "", user_input, flags=re.IGNORECASE).strip()
+            user_input = re.sub(r"^(\s*Usuario:\s*)+", "", user_input, flags=re.IGNORECASE).strip()
         except (KeyboardInterrupt, EOFError):
             print(f"\n{Colors.CYAN}👋 Sesión finalizada. ¡Hasta luego!{Colors.RESET}")
             break

@@ -61,6 +61,7 @@ class RecommendationIntentExtraction(BaseModel):
         description="Atributos o beneficios explícitamente requeridos (ej: ['a prueba de agua', 'larga duración', 'mate']).",
     )
     search_query: str = Field(
+        default="productos recomendados",
         description="Consulta semántica depurada optimizada para búsqueda vectorial híbrida en el catálogo de productos.",
     )
 

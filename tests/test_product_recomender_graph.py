@@ -771,3 +771,42 @@ async def test_resilient_structured_output_recovers_markdown_json():
     assert output.top_k == 5
     assert output.sort_by == "price_asc"
 
+
+@pytest.mark.asyncio
+async def test_extract_recommendation_intent_handles_malformed_langchain_dict():
+    """Valida que extract_recommendation_intent_node no colapse ante dicts de error de LangChain."""
+    mock_extractor = AsyncMock()
+    # Simula el dict que arrojó LangChain cuando ocurrió el error reportado
+    mock_extractor.ainvoke.return_value = {
+        "raw": AIMessage(content="Pensamiento sin json"),
+        "parsing_error": None,
+    }
+
+    mock_llm = MagicMock()
+    nodes = ProductRecomenderNodes(
+        llm=mock_llm,
+        vector_store=MagicMock(),
+        odoo_client=MagicMock(),
+    )
+    nodes._intent_extractor = mock_extractor
+
+    state: ProductRecomenderState = {
+        "raw_query": "dame el detalle del pedido de Janet",
+        "messages": [],
+    }
+
+    # No debe arrojar ValidationError
+    result = await nodes.extract_recommendation_intent(state)
+    assert result["top_k"] == 15
+    assert result["relation_type"] == "general_recommendation"
+    assert "dame el detalle del pedido de Janet" in result["search_query"] or "productos recomendados" in result["search_query"]
+
+
+def test_recommendation_intent_extraction_has_safe_defaults():
+    """Valida que el esquema Pydantic pueda instanciarse con campos vacíos sin fallar."""
+    extraction = RecommendationIntentExtraction()
+    assert extraction.search_query == "productos recomendados"
+    assert extraction.top_k == 15
+    assert extraction.sort_by == "relevance"
+
+

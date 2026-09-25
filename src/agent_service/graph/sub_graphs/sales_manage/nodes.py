@@ -163,7 +163,13 @@ class SalesManageNodes:
         if extraction is None:
             extraction = SalesExtractionResult(action="list")
         elif isinstance(extraction, dict):
-            extraction = SalesExtractionResult(**extraction)
+            try:
+                valid_keys = SalesExtractionResult.model_fields.keys()
+                clean_kwargs = {k: v for k, v in extraction.items() if k in valid_keys and v is not None}
+                extraction = SalesExtractionResult(**clean_kwargs)
+            except Exception as exc:
+                logger.warning(f"[SalesManage] Error parseando dict de extracción ({exc}). Usando fallback.")
+                extraction = SalesExtractionResult(action="list")
 
         items_dict = [
             it.model_dump() if hasattr(it, "model_dump") else (it.dict() if hasattr(it, "dict") else dict(it))
@@ -731,7 +737,13 @@ class SalesManageNodes:
                 reasoning="Coincidencia sugerida por fecha reciente.",
             )
         elif isinstance(judge, dict):
-            judge = SalesDuplicateCheckResult(**judge)
+            try:
+                valid_keys = SalesDuplicateCheckResult.model_fields.keys()
+                clean_kwargs = {k: v for k, v in judge.items() if k in valid_keys and v is not None}
+                judge = SalesDuplicateCheckResult(**clean_kwargs)
+            except Exception as exc:
+                logger.warning(f"[SalesManage] Error parseando dict de duplicados ({exc}). Usando fallback.")
+                judge = SalesDuplicateCheckResult(has_duplicates=False)
 
         has_dups = getattr(judge, "has_duplicates", False)
         matched_name = getattr(judge, "matched_order_name", None)

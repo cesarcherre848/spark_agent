@@ -54,7 +54,9 @@ from src.agent_service.soul import inject_soul, SoulRole
 from src.agent_service.core.guardrails import (
     evaluate_input_guardrail,
     format_guardrail_refusal,
+    format_guardrail_warning,
     ViolationCategory,
+    GuardrailAction,
 )
 
 logger = logging.getLogger(__name__)
@@ -72,12 +74,19 @@ class MainGraphState(TypedDict, total=False):
 
     # Guardrail de entrada y seguridad
     is_blocked: Optional[bool]
+    is_warning: Optional[bool]
+    guardrail_action: Optional[str]
     guardrail_category: Optional[str]
     guardrail_reason: Optional[str]
+    guardrail_warning: Optional[str]
+    guardrail_scores: Optional[Dict[str, float]]
 
     # Clasificación del Router
     intent: Optional[Literal["rag", "resolver", "general", "contact", "sales", "recommender", "out_of_scope"]]
     intent_reasoning: Optional[str]
+    router_model: Optional[str]
+    router_confidence: Optional[float]
+    router_scores: Optional[Dict[str, Any]]
 
     # Memoria recuperada
     user_context: Optional[str]
@@ -166,7 +175,7 @@ class RouterDecision(BaseModel):
 # 3. NODOS DEL GRAFO PRINCIPAL
 # ==============================================================================
 def create_input_guardrail_node():
-    """Crea el nodo de evaluación de Guardrail Capa 1 (Fast-Path determinista)."""
+    """Crea el nodo de evaluación de Guardrail híbrido (Capa 1 Regex + Capa 2 Laya)."""
     async def input_guardrail_node(state: MainGraphState) -> dict:
         raw_query = state.get("raw_query")
         if not raw_query and state.get("messages"):
@@ -181,22 +190,46 @@ def create_input_guardrail_node():
         if eval_result.is_blocked:
             refusal_msg = eval_result.refusal_message or format_guardrail_refusal(eval_result.category)
             logger.warning(
-                f"[Capa 1 Guardrail] Petición bloqueada. Categoría: {eval_result.category.value}. "
-                f"Razón: {eval_result.reason}"
+                f"[Capa 1/2 Guardrail] Petición bloqueada. Categoría: {eval_result.category.value}. "
+                f"Acción: {eval_result.action.value}. Razón: {eval_result.reason}"
             )
             return {
                 "is_blocked": True,
+                "is_warning": False,
+                "guardrail_action": eval_result.action.value,
                 "guardrail_category": eval_result.category.value,
                 "guardrail_reason": eval_result.reason,
+                "guardrail_warning": None,
+                "guardrail_scores": eval_result.scores,
                 "raw_query": raw_query,
                 "final_response": refusal_msg,
                 "messages": [AIMessage(content=refusal_msg)],
             }
 
+        if eval_result.is_warning:
+            logger.info(
+                f"[Capa 2 Guardrail] Advertencia comercial emitida. Categoría: {eval_result.category.value}. "
+                f"Acción: {eval_result.action.value}. Razón: {eval_result.reason}"
+            )
+            return {
+                "is_blocked": False,
+                "is_warning": True,
+                "guardrail_action": eval_result.action.value,
+                "guardrail_category": eval_result.category.value,
+                "guardrail_reason": eval_result.reason,
+                "guardrail_warning": eval_result.warning_message,
+                "guardrail_scores": eval_result.scores,
+                "raw_query": raw_query,
+            }
+
         return {
             "is_blocked": False,
+            "is_warning": False,
+            "guardrail_action": eval_result.action.value,
             "guardrail_category": ViolationCategory.NONE.value,
             "guardrail_reason": eval_result.reason,
+            "guardrail_warning": None,
+            "guardrail_scores": eval_result.scores,
             "raw_query": raw_query,
         }
 
@@ -226,7 +259,7 @@ def create_guardrail_blocked_node():
 
 
 def create_router_node(llm: BaseChatModel):
-    """Crea el nodo enrutador determinista con temperatura 0.0."""
+    """Crea el nodo enrutador inteligente basado en LLM estructurado."""
     structured_router = bind_structured_output(bind_temperature(llm, 0.0), RouterDecision)
 
     async def router_node(state: MainGraphState) -> dict:
@@ -237,8 +270,8 @@ def create_router_node(llm: BaseChatModel):
                     raw_query = str(m.content)
                     break
         raw_query = (raw_query or "").strip()
+        user_context = state.get("user_context")
 
-        # Recortar historial a los últimos mensajes para contexto relevante
         trimmed_history = trim_messages(
             state.get("messages", []),
             max_tokens=10,
@@ -256,44 +289,54 @@ def create_router_node(llm: BaseChatModel):
                - Preguntas sobre ingredientes, ficha técnica, modo de uso o existencia puntual (ej: '¿tienen protector solar?', '¿qué componentes tiene la crema Bio Milk?', '¿tienen labiales mate disponibles?').
             3. 'resolver': Cotización directa o precios/stock con códigos SKU numéricos específicos (ej: 'precio del SKU 1', 'cotiza 3 del SKU 5').
             4. 'contact': Gestión de cartera de clientes comerciales (ej: 'mis clientes', 'agregar cliente Carlos').
-            5. 'sales': Gestión de pedidos y cotizaciones (ej: 'mis pedidos', 'confirmar orden SO001', 'cotizar a cliente').
+            5. 'sales': Gestión de pedidos, órdenes y cotizaciones comerciales (ej: 'mis pedidos', 'confirmar orden SO001', 'detalle del pedido de Janet', 'cómo van las órdenes de Carlos', 'cotizar a cliente').
             6. 'general': Saludos de cortesía, despedidas o preguntas sobre qué servicios puedes brindar.
             7. 'out_of_scope': Solicitud ajena al negocio (poemas, chistes, código/programación, tareas escolares, ciencias, consejos personales).
         """
 
-        user_context = state.get("user_context")
         context_block = f"\nAntecedentes de memoria:\n{user_context}\n" if user_context else ""
-
         user_prompt = f"""
             {context_block}Consulta actual: {raw_query}
         """
 
-        decision: Optional[RouterDecision] = await structured_router.ainvoke([
-            SystemMessage(content=system_prompt),
-            *trimmed_history,
-            HumanMessage(content=user_prompt),
-        ])
+        try:
+            decision: Optional[RouterDecision] = await structured_router.ainvoke([
+                SystemMessage(content=system_prompt),
+                *trimmed_history,
+                HumanMessage(content=user_prompt),
+            ])
+            intent = decision.intent if decision and hasattr(decision, "intent") else "general"
+            reasoning = decision.reasoning if decision and hasattr(decision, "reasoning") else "Enrutamiento por defecto"
+        except Exception as exc:
+            logger.error(f"[Router/LLM] Error en enrutamiento con LLM: {exc}")
+            intent = "general"
+            reasoning = f"Fallback emergente ante error de LLM: {exc}"
 
-        intent = decision.intent if decision and hasattr(decision, "intent") else "general"
-        reasoning = decision.reasoning if decision and hasattr(decision, "reasoning") else "Enrutamiento por defecto"
+        logger.info(f"Router LLM clasificó consulta como: '{intent}' (Razón: {reasoning})")
 
-        logger.info(f"Router clasificó consulta como: '{intent}' (Razón: {reasoning})")
         output: dict = {
             "intent": intent,
             "intent_reasoning": reasoning,
+            "router_model": "llm",
             "raw_query": raw_query,
             "final_response": None,
             "cancellation_reason": None,
         }
 
-        # Si el Router clasifica como out_of_scope, preparar bloqueo semántico y mensaje educado
+        # Si el Router clasifica como out_of_scope, preparar bloqueo o permitir advertencia si ya venía marcada
         if intent == "out_of_scope":
-            refusal_msg = format_guardrail_refusal(ViolationCategory.OUT_OF_SCOPE)
-            output["is_blocked"] = True
-            output["guardrail_category"] = ViolationCategory.OUT_OF_SCOPE.value
-            output["guardrail_reason"] = reasoning
-            output["final_response"] = refusal_msg
-            output["messages"] = [AIMessage(content=refusal_msg)]
+            if state.get("is_warning"):
+                logger.info(
+                    "[Router] Consulta clasificada como out_of_scope con advertencia previa (WARN). "
+                    "Permitiendo orientación cordial en general_chat."
+                )
+            else:
+                refusal_msg = format_guardrail_refusal(ViolationCategory.OUT_OF_SCOPE)
+                output["is_blocked"] = True
+                output["guardrail_category"] = ViolationCategory.OUT_OF_SCOPE.value
+                output["guardrail_reason"] = reasoning
+                output["final_response"] = refusal_msg
+                output["messages"] = [AIMessage(content=refusal_msg)]
 
         # Asegurar que el mensaje del usuario quede registrado en el historial si no venía en messages
         existing_msgs = state.get("messages", [])
@@ -345,6 +388,10 @@ def create_general_chat_node(llm: BaseChatModel):
         ])
 
         reply_text = extract_clean_text(response.content)
+        guardrail_warning = state.get("guardrail_warning")
+        if state.get("is_warning") and guardrail_warning and guardrail_warning not in reply_text:
+            reply_text = f"{guardrail_warning}\n\n{reply_text}"
+
         return {
             "final_response": reply_text,
             "messages": [AIMessage(content=reply_text)],
@@ -369,6 +416,8 @@ def _route_after_router(state: MainGraphState) -> Literal[
     """Enrutamiento condicional según la intención detectada."""
     intent = state.get("intent", "general")
     if intent == "out_of_scope":
+        if state.get("is_warning"):
+            return "general_chat"
         return "guardrail_blocked"
     elif intent == "rag":
         return "product_rag"

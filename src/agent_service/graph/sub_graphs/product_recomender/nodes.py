@@ -114,7 +114,16 @@ class ProductRecomenderNodes:
         extraction: Optional[RecommendationIntentExtraction] = await self._intent_extractor.ainvoke(messages)
         if extraction is None or not isinstance(extraction, RecommendationIntentExtraction):
             if isinstance(extraction, dict):
-                extraction = RecommendationIntentExtraction(**extraction)
+                try:
+                    valid_keys = RecommendationIntentExtraction.model_fields.keys()
+                    clean_kwargs = {k: v for k, v in extraction.items() if k in valid_keys and v is not None}
+                    extraction = RecommendationIntentExtraction(**clean_kwargs)
+                except Exception as exc:
+                    logger.warning(f"[ProductRecomender] Error parseando dict de intención ({exc}). Usando fallback.")
+                    extraction = RecommendationIntentExtraction(
+                        search_query=raw_query or "productos recomendados",
+                        top_k=self._default_top_k,
+                    )
             else:
                 extraction = RecommendationIntentExtraction(
                     search_query=raw_query or "productos recomendados",
@@ -384,8 +393,14 @@ class ProductRecomenderNodes:
         judge_res: Optional[RubricEvaluationResult] = await self._rubric_judge.ainvoke(messages)
         if judge_res is None or not isinstance(judge_res, RubricEvaluationResult):
             if isinstance(judge_res, dict):
-                judge_res = RubricEvaluationResult(**judge_res)
-            else:
+                try:
+                    valid_keys = RubricEvaluationResult.model_fields.keys()
+                    clean_kwargs = {k: v for k, v in judge_res.items() if k in valid_keys and v is not None}
+                    judge_res = RubricEvaluationResult(**clean_kwargs)
+                except Exception as exc:
+                    logger.warning(f"[ProductRecomender] Error parseando dict de rúbrica ({exc}). Usando fallback.")
+                    judge_res = None
+            if not isinstance(judge_res, RubricEvaluationResult):
                 # Fallback seguro
                 meets = len(filtered) > 0
                 return {

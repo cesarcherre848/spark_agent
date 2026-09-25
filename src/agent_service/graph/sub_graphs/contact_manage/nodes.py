@@ -95,7 +95,13 @@ class ContactManageNodes:
         if extraction is None:
             extraction = CustomerExtractionResult(action="list")
         elif isinstance(extraction, dict):
-            extraction = CustomerExtractionResult(**extraction)
+            try:
+                valid_keys = CustomerExtractionResult.model_fields.keys()
+                clean_kwargs = {k: v for k, v in extraction.items() if k in valid_keys and v is not None}
+                extraction = CustomerExtractionResult(**clean_kwargs)
+            except Exception as exc:
+                logger.warning(f"[ContactManage] Error parseando dict de extracción ({exc}). Usando fallback.")
+                extraction = CustomerExtractionResult(action="list")
 
         return {
             "contact_action": getattr(extraction, "action", "list"),
@@ -186,7 +192,13 @@ class ContactManageNodes:
                 reasoning="Coincidencia detectada por datos similares.",
             )
         elif isinstance(judge, dict):
-            judge = DuplicateCheckResult(**judge)
+            try:
+                valid_keys = DuplicateCheckResult.model_fields.keys()
+                clean_kwargs = {k: v for k, v in judge.items() if k in valid_keys and v is not None}
+                judge = DuplicateCheckResult(**clean_kwargs)
+            except Exception as exc:
+                logger.warning(f"[ContactManage] Error parseando dict de duplicados ({exc}). Usando fallback.")
+                judge = DuplicateCheckResult(has_duplicates=False)
 
         target_id = state.get("target_contact_id") or getattr(judge, "matched_customer_id", None)
         return {
