@@ -137,6 +137,9 @@ async def process_webhook(
             raw_final_response = messages[-1].content
 
     final_response = extract_clean_text(raw_final_response)
+    guardrail_warning = result.get("guardrail_warning")
+    if result.get("is_warning") and guardrail_warning and guardrail_warning not in final_response:
+        final_response = f"{guardrail_warning}\n\n{final_response}"
 
     intent = result.get("intent")
     is_topic_finished = bool(result.get("is_topic_finished", False))

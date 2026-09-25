@@ -40,6 +40,13 @@ def mock_llm():
     return llm
 
 
+@pytest.fixture(autouse=True)
+def mock_laya_evaluator(monkeypatch):
+    """Asegura que las pruebas unitarias de Capa 1 prueben el filtrado determinista sin inferencia pesada de Laya."""
+    monkeypatch.setattr("src.agent_service.core.guardrails.evaluator.run_laya_evaluation", lambda q, q_defs: None)
+
+
+
 # ==============================================================================
 # 2. PRUEBAS UNITARIAS: CAPA 1 FAST-PATH DETERMINISTA
 # ==============================================================================
