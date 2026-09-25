@@ -17,6 +17,7 @@ from src.agent_service.api.service import (
 from src.agent_service.graph.main_graph import get_main_graph
 from src.agent_service.config.database import close_db_pool
 from src.agent_service.core.llms.factory import clean_text_from_tool_call_artifacts, extract_clean_text
+from src.agent_service.api.whatsapp.router import router as whatsapp_router
 
 load_dotenv(".env.dev")
 
@@ -57,6 +58,11 @@ app = FastAPI(
     description="Endpoint HTTP Webhook para integración de Spark Agent con canales de mensajería (OpenClaw, WhatsApp, etc.).",
     lifespan=lifespan,
 )
+
+# Montar módulo exclusivo de WhatsApp Cloud API (Meta)
+app.include_router(whatsapp_router, prefix="/api/v1/whatsapp")
+app.include_router(whatsapp_router, prefix="/whatsapp", include_in_schema=False)
+
 
 
 @app.get("/health", status_code=status.HTTP_200_OK, tags=["Health"])
