@@ -9,6 +9,7 @@ __pycache__/
 .gitignore
 .env*
 !.env.dev.example
+!.env.qa.example
 collection_bruno/
 .DS_Store
 *.md

@@ -1,0 +1,76 @@
+services:
+  traefik:
+    container_name: traefik_qa
+    image: traefik:v3.1
+    restart: unless-stopped
+    command:
+      # Proveedor Docker dinámico
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.docker.network=spark_agent_qa_net"
+      
+      # Entrypoints HTTP y HTTPS
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      
+      # Redirección obligatoria de HTTP a HTTPS (301)
+      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
+      
+      # Resolver Let's Encrypt (ACME con desafío TLS-ALPN-01)
+      - "--certificatesresolvers.letsencrypt.acme.tlschallenge=true"
+      - "--certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL:-cesarcherre@gmail.com}"
+      - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
+      
+      # Nivel de log para monitoreo
+      - "--log.level=INFO"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - traefik_letsencrypt:/letsencrypt
+    networks:
+      - traefik_net
+
+  spark_agent:
+    container_name: spark_agent_qa
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: spark_agent:qa
+    restart: unless-stopped
+    env_file:
+      - .env.qa
+    environment:
+      - HF_HOME=/root/.cache/huggingface
+      - SENTENCE_TRANSFORMERS_HOME=/root/.cache/huggingface
+      - EMBEDDING_CACHE_DIR=/root/.cache/huggingface
+    volumes:
+      - embedding_cache:/root/.cache/huggingface
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - traefik_net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.spark_agent_qa.rule=Host(`${DOMAIN:-mia-dev.evaspark.com}`)"
+      - "traefik.http.routers.spark_agent_qa.entrypoints=websecure"
+      - "traefik.http.routers.spark_agent_qa.tls=true"
+      - "traefik.http.routers.spark_agent_qa.tls.certresolver=letsencrypt"
+      - "traefik.http.services.spark_agent_qa.loadbalancer.server.port=8000"
+
+networks:
+  traefik_net:
+    name: spark_agent_qa_net
+    driver: bridge
+
+volumes:
+  traefik_letsencrypt:
+    name: spark_agent_qa_letsencrypt
+  embedding_cache:
+    name: spark_agent_embedding_cache
