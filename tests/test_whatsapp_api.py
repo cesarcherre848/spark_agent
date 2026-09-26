@@ -291,3 +291,47 @@ def test_send_manual_endpoint_success(test_client, mock_whatsapp_client):
         text="Aviso de pedido listo",
         preview_url=False,
     )
+
+
+# ==============================================================================
+# 6. PRUEBAS DEL MÓDULO DEDICADO WHATSAPP_RESPONDER
+# ==============================================================================
+
+@pytest.mark.asyncio
+async def test_responder_chunk_and_format(mock_whatsapp_client):
+    from src.agent_service.api.whatsapp.responder import WhatsAppResponder
+    settings = WhatsAppSettings(auto_reply=True)
+    responder = WhatsAppResponder(client=mock_whatsapp_client, settings=settings)
+
+    # Texto con artefacto interno de LLM (dict de Gemini) que debe ser limpiado
+    raw = "{'type': 'text', 'text': 'Hola, esta es tu cotización formal.'}"
+    formatted = responder.format_response(raw)
+    assert formatted == "Hola, esta es tu cotización formal."
+
+    # Prueba de chunking de mensaje largo
+    long_msg = "A" * 8500
+    chunks = responder.chunk_message(long_msg, max_length=4000)
+    assert len(chunks) == 3
+    assert len(chunks[0]) == 4000
+    assert len(chunks[1]) == 4000
+    assert len(chunks[2]) == 500
+
+
+@pytest.mark.asyncio
+async def test_responder_sends_with_dynamic_phone_number_id(mock_whatsapp_client):
+    from src.agent_service.api.whatsapp.responder import WhatsAppResponder
+    settings = WhatsAppSettings(auto_reply=True)
+    responder = WhatsAppResponder(client=mock_whatsapp_client, settings=settings)
+
+    await responder.send_response(
+        to="51988776655",
+        text="Respuesta personalizada",
+        phone_number_id="109823485721903",
+    )
+
+    mock_whatsapp_client.send_text_message.assert_awaited_once_with(
+        to="51988776655",
+        text="Respuesta personalizada",
+        phone_number_id="109823485721903",
+    )
+

@@ -22,12 +22,13 @@ class WhatsAppClient:
         self._settings = settings or get_whatsapp_settings()
         self._client = client
 
-    def _get_url(self) -> str:
+    def _get_url(self, phone_number_id: Optional[str] = None) -> str:
         """Construye la URL base del endpoint de mensajes de WhatsApp Cloud API."""
+        pid = phone_number_id or self._settings.phone_number_id
         return (
             f"{self._settings.api_base_url.rstrip('/')}/"
             f"{self._settings.api_version}/"
-            f"{self._settings.phone_number_id}/messages"
+            f"{pid}/messages"
         )
 
     def _get_headers(self) -> Dict[str, str]:
@@ -42,6 +43,7 @@ class WhatsAppClient:
         to: str,
         text: str,
         preview_url: bool = False,
+        phone_number_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Envía un mensaje de texto plano a un usuario de WhatsApp.
 
@@ -49,6 +51,7 @@ class WhatsAppClient:
             to: Número telefónico destino en formato internacional (solo dígitos, ej: 51999999999).
             text: Mensaje de texto a enviar al usuario.
             preview_url: Si se habilita vista previa de URLs en el mensaje.
+            phone_number_id: Identificador opcional del número emisor en WhatsApp Cloud API.
 
         Returns:
             Diccionario con la respuesta de Meta Graph API conteniendo los IDs de mensaje generados.
@@ -72,7 +75,7 @@ class WhatsAppClient:
             },
         }
 
-        url = self._get_url()
+        url = self._get_url(phone_number_id=phone_number_id)
         headers = self._get_headers()
 
         logger.info(f"[WhatsAppClient] Enviando mensaje a {clean_to} (Longitud: {len(clean_text)} chars)...")
@@ -92,7 +95,11 @@ class WhatsAppClient:
             response.raise_for_status()
             return response.json()
 
-    async def mark_message_as_read(self, message_id: str) -> bool:
+    async def mark_message_as_read(
+        self,
+        message_id: str,
+        phone_number_id: Optional[str] = None,
+    ) -> bool:
         """Marca un mensaje entrante como leído en WhatsApp (doble check azul)."""
         if not message_id:
             return False
@@ -103,7 +110,7 @@ class WhatsAppClient:
             "message_id": message_id,
         }
 
-        url = self._get_url()
+        url = self._get_url(phone_number_id=phone_number_id)
         headers = self._get_headers()
 
         try:

@@ -9,6 +9,7 @@ from langchain_core.messages import HumanMessage
 from src.agent_service.api.service import PhoneUserResolver, get_phone_user_resolver, normalize_phone
 from src.agent_service.api.whatsapp.client import WhatsAppClient, get_whatsapp_client
 from src.agent_service.api.whatsapp.config import WhatsAppSettings, get_whatsapp_settings
+from src.agent_service.api.whatsapp.responder import WhatsAppResponder, get_whatsapp_responder
 from src.agent_service.core.llms.factory import extract_clean_text
 
 logger = logging.getLogger(__name__)
@@ -23,11 +24,13 @@ class WhatsAppService:
         resolver: Optional[PhoneUserResolver] = None,
         graph_app: Optional[Any] = None,
         settings: Optional[WhatsAppSettings] = None,
+        responder: Optional[WhatsAppResponder] = None,
     ):
         self._client = client or get_whatsapp_client()
         self._resolver = resolver or get_phone_user_resolver()
         self._graph_app = graph_app
         self._settings = settings or get_whatsapp_settings()
+        self._responder = responder or WhatsAppResponder(client=self._client, settings=self._settings)
 
     def _get_graph_app(self) -> Any:
         """Obtiene de forma perezosa la instancia del grafo principal si no fue inyectada."""
@@ -53,6 +56,9 @@ class WhatsAppService:
                 if not isinstance(value, dict):
                     continue
 
+                metadata = value.get("metadata", {})
+                phone_number_id = metadata.get("phone_number_id") if isinstance(metadata, dict) else None
+
                 messages = value.get("messages", [])
                 if not isinstance(messages, list):
                     continue
@@ -71,6 +77,7 @@ class WhatsAppService:
                                 "body": body,
                                 "id": msg_id,
                                 "timestamp": msg.get("timestamp", ""),
+                                "phone_number_id": phone_number_id,
                             })
 
         return extracted
@@ -80,6 +87,7 @@ class WhatsAppService:
         sender_phone: str,
         text: str,
         message_id: Optional[str] = None,
+        phone_number_id: Optional[str] = None,
     ) -> Optional[str]:
         """Procesa un mensaje de usuario: resuelve vendedor en Odoo, ejecuta el grafo y envía respuesta."""
         normalized_phone = normalize_phone(sender_phone)
@@ -94,7 +102,10 @@ class WhatsAppService:
         # 1. Marcar como leído en WhatsApp si se cuenta con el ID del mensaje
         if message_id:
             try:
-                await self._client.mark_message_as_read(message_id)
+                if phone_number_id:
+                    await self._client.mark_message_as_read(message_id, phone_number_id=phone_number_id)
+                else:
+                    await self._client.mark_message_as_read(message_id)
             except Exception as e:
                 logger.debug(f"[WhatsAppService] Error no bloqueante al marcar leído: {e}")
 
@@ -106,7 +117,7 @@ class WhatsAppService:
 
         logger.info(
             f"[WhatsAppService] Procesando mensaje de {normalized_phone} "
-            f"(user_id={user_id}, session_id={session_id}): '{clean_text}'"
+            f"(user_id={user_id}, session_id={session_id}, phone_number_id={phone_number_id}): '{clean_text}'"
         )
 
         # 4. Invocación asíncrona del Grafo Principal de Spark Agent
@@ -125,19 +136,27 @@ class WhatsAppService:
             logger.error(f"[WhatsAppService] Error durante la ejecución del grafo: {exc}", exc_info=True)
             error_msg = "Lo siento, ha ocurrido un error temporal al procesar tu consulta. Por favor intenta nuevamente en unos momentos."
             if self._settings.auto_reply:
-                await self._client.send_text_message(to=normalized_phone, text=error_msg)
+                await self._responder.send_response(
+                    to=normalized_phone,
+                    text=error_msg,
+                    phone_number_id=phone_number_id,
+                )
             return error_msg
 
-        # 5. Extraer y sanear la respuesta final conversacional
+        # 5. Formatear y sanear la respuesta final conversacional
         raw_response = final_state.get("final_response") or ""
-        clean_response = extract_clean_text(raw_response)
+        clean_response = self._responder.format_response(raw_response)
         if not clean_response:
             clean_response = "Disculpa, no pude generar una respuesta en este momento."
 
-        # 6. Despachar la respuesta al usuario mediante WhatsApp Cloud API
+        # 6. Despachar la respuesta al usuario mediante WhatsAppResponder
         if self._settings.auto_reply:
             try:
-                await self._client.send_text_message(to=normalized_phone, text=clean_response)
+                await self._responder.send_response(
+                    to=normalized_phone,
+                    text=clean_response,
+                    phone_number_id=phone_number_id,
+                )
                 logger.info(f"[WhatsAppService] Respuesta despachada exitosamente a {normalized_phone}")
             except Exception as exc:
                 logger.error(f"[WhatsAppService] Error al enviar respuesta a Meta Graph API: {exc}")
@@ -154,6 +173,7 @@ class WhatsAppService:
                 sender_phone=msg["from"],
                 text=msg["body"],
                 message_id=msg.get("id"),
+                phone_number_id=msg.get("phone_number_id"),
             )
             if resp:
                 responses.append(resp)
