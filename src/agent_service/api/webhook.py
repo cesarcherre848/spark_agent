@@ -21,7 +21,8 @@ from src.agent_service.api.whatsapp.router import router as whatsapp_router
 
 load_dotenv(".env.dev")
 
-
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+logging.getLogger("src.agent_service").setLevel(logging.INFO)
 logger = logging.getLogger(__name__)
 
 _GLOBAL_GRAPH_APP: Optional[Any] = None
@@ -127,15 +128,26 @@ async def process_webhook(
 
     # 3. Invocar asíncronamente el Grafo Principal de Spark Agent
     try:
-        graph_input = {
-            "raw_query": payload.raw_query,
-            "user_id": user_id,
-            "session_id": thread_id,
-        }
-        result = await graph.ainvoke(
-            graph_input,
-            config={"configurable": {"thread_id": thread_id}},
-        )
+        from langgraph.types import Command
+        thread_config = {"configurable": {"thread_id": thread_id}}
+        thread_state = await graph.aget_state(thread_config)
+        has_pending_interrupt = bool(thread_state and thread_state.tasks and any(t.interrupts for t in thread_state.tasks))
+
+        if has_pending_interrupt:
+            logger.info(f"[Webhook] Reanudando interrupt pendiente en {thread_id} con Command(resume='{payload.raw_query}')")
+            result = await graph.ainvoke(Command(resume=payload.raw_query), config=thread_config)
+        else:
+            graph_input = {
+                "raw_query": payload.raw_query,
+                "user_id": user_id,
+                "session_id": thread_id,
+            }
+            if payload.channel:
+                graph_input["channel"] = payload.channel
+            result = await graph.ainvoke(
+                graph_input,
+                config=thread_config,
+            )
     except Exception as e:
         logger.error(f"Error en la ejecución del grafo principal: {e}", exc_info=True)
         raise HTTPException(
@@ -143,8 +155,19 @@ async def process_webhook(
             detail=f"Error interno procesando la consulta con el agente: {str(e)}",
         )
 
-    # 4. Extraer respuesta final y metadatos sanitizados
-    raw_final_response = result.get("final_response") or ""
+    # 4. Extraer respuesta final o pregunta de confirmación HITL (interrupt)
+    if result.get("__interrupt__"):
+        interrupts = result["__interrupt__"]
+        intr_val = interrupts[0].value if interrupts else {}
+        if isinstance(intr_val, dict) and "question" in intr_val:
+            raw_final_response = intr_val["question"]
+        elif isinstance(intr_val, dict) and "clarification_question" in intr_val:
+            raw_final_response = intr_val["clarification_question"]
+        else:
+            raw_final_response = str(intr_val)
+    else:
+        raw_final_response = result.get("final_response") or ""
+
     if not raw_final_response:
         messages = result.get("messages", [])
         if messages and hasattr(messages[-1], "content"):

@@ -57,6 +57,7 @@ async def receive_webhook(
     1. Responde de inmediato con HTTP 200 {"status": "ok"}.
     2. Encola el procesamiento del mensaje, resolución en Odoo y respuesta en BackgroundTasks.
     """
+    logger.info(f"[WhatsApp Webhook] Payload recibido: {payload}")
     # Si es una notificación de entrega/lectura (statuses) sin mensajes, no encolar tarea
     has_messages = False
     for entry in payload.get("entry", []):

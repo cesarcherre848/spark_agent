@@ -397,7 +397,7 @@ async def odoo_create_quotation(
     if not order_lines:
         return {
             "success": False,
-            "error": f"Los productos con código {not_found_skus or skus_to_resolve} no existen o están inactivos en Odoo.",
+            "error": f"Los productos con código {not_found_skus or skus_to_resolve} no existen o están inactivos en el sistema.",
             "not_found_skus": not_found_skus or skus_to_resolve,
         }
 
@@ -469,7 +469,7 @@ async def odoo_update_quotation(
     if not order_id:
         return {
             "success": False,
-            "error": "No se identificó el ID o nombre de la cotización a actualizar en Odoo.",
+            "error": "No se identificó el ID o nombre de la cotización a actualizar en el sistema.",
         }
 
     # 1. Leer las líneas existentes en la orden de venta
@@ -496,7 +496,7 @@ async def odoo_update_quotation(
     if not order_records:
         return {
             "success": False,
-            "error": f"No se encontró la cotización con ID {order_id} en Odoo.",
+            "error": f"No se encontró la cotización con ID {order_id} en el sistema.",
         }
 
     existing_line_ids = order_records[0].get("order_line", [])
@@ -587,7 +587,7 @@ async def odoo_update_quotation(
     if not items_by_pid and not_found_skus:
         return {
             "success": False,
-            "error": f"Los productos con código {not_found_skus} no existen o están inactivos en Odoo.",
+            "error": f"Los productos con código {not_found_skus} no existen o están inactivos en el sistema.",
             "not_found_skus": not_found_skus,
         }
 

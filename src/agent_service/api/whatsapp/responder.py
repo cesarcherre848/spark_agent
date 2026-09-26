@@ -3,11 +3,13 @@ src/agent_service/api/whatsapp/responder.py - Módulo de Despacho y Formateo de 
 """
 
 import logging
+import re
 from typing import Optional, Dict, Any, List
 
 from src.agent_service.api.whatsapp.client import WhatsAppClient, get_whatsapp_client
 from src.agent_service.api.whatsapp.config import WhatsAppSettings, get_whatsapp_settings
 from src.agent_service.core.llms.factory import extract_clean_text
+from src.agent_service.core.templates.dialogs import WhitelabelSanitizer
 
 logger = logging.getLogger(__name__)
 
@@ -28,9 +30,13 @@ class WhatsAppResponder:
 
     @staticmethod
     def format_response(text: str) -> str:
-        """Sanitiza y limpia el texto generado por el agente para WhatsApp, eliminando artefactos internos."""
+        """Sanitiza y limpia el texto generado por el agente para WhatsApp, eliminando artefactos internos y términos de backend."""
         clean = extract_clean_text(str(text or ""))
-        return clean.strip()
+        if not clean:
+            return ""
+
+        # Fail-safe / Whitelabel defense: Eliminar menciones a infraestructura y backend
+        return WhitelabelSanitizer.clean_text(clean)
 
     @staticmethod
     def chunk_message(text: str, max_length: int = MAX_WHATSAPP_MESSAGE_LENGTH) -> List[str]:

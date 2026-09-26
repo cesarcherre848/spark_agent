@@ -10,6 +10,7 @@ class ContactManageState(TypedDict, total=False):
     raw_query: Optional[str]
     user_id: Optional[Union[int, str]]
     session_id: Optional[str]
+    channel: Optional[Literal["whatsapp", "web", "other"]]
 
     # Extracción de intención y datos
     contact_action: Literal["list", "upsert", "remove"]

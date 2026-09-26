@@ -26,12 +26,14 @@ from src.agent_service.graph.sub_graphs.contact_manage.schemas import (
     CustomerSynthesizeResponse,
 )
 from src.agent_service.core.hitl import parse_hitl_binary_decision
+from src.agent_service.core.templates.dialogs import HITLDialogTemplates
 from src.agent_service.soul import inject_soul, SoulRole
+from src.agent_service.graph.base_synthesizer import BaseSynthesizerNode
 
 logger = logging.getLogger(__name__)
 
 
-class ContactManageNodes:
+class ContactManageNodes(BaseSynthesizerNode):
     """Nodos del subgrafo de gestión de clientes/contactos en Odoo ERP."""
 
     def __init__(
@@ -42,6 +44,7 @@ class ContactManageNodes:
         upsert_customer_tool: Callable[..., Awaitable[Dict[str, Any]]] = odoo_upsert_customer,
         remove_customer_tool: Callable[..., Awaitable[Dict[str, Any]]] = odoo_remove_customer,
     ):
+        super().__init__(llm=llm)
         self._llm = llm
         self._get_customers_tool = get_customers_tool
         self._list_current_customers_tool = list_current_customers_tool
@@ -71,7 +74,7 @@ class ContactManageNodes:
         )
 
         system_prompt = """
-            Eres un asistente especializado en CRM y gestión de cartera de clientes (Customers) para Odoo ERP.
+            Eres un asistente especializado en CRM y gestión de cartera de clientes (Customers).
             Tu labor es clasificar la acción solicitada por el vendedor y extraer los datos del cliente:
 
             1. 'action':
@@ -80,7 +83,7 @@ class ContactManageNodes:
                 - 'remove': si el vendedor pide eliminar, archivar o borrar un cliente de su cartera.
             2. 'name': Nombre de la persona o razón social de la empresa cliente. Es OBLIGATORIO para upsert y remove (salvo que proporcione ID).
             3. 'phones': Lista con los números telefónicos o celulares detectados (ej. ['987654321', '912345678']).
-            4. 'contact_id': ID numérico de Odoo si el usuario hace referencia a un ID específico (ej. 'cliente ID 6').
+            4. 'contact_id': ID numérico si el usuario hace referencia a un ID específico (ej. 'cliente ID 6').
         """
 
         user_prompt = f"Consulta o instrucción del vendedor:\n{raw_query}"
@@ -174,7 +177,7 @@ class ContactManageNodes:
             Nombre: {name}
             Teléfonos: {', '.join(phones) if phones else 'Ninguno'}
 
-            Candidatos existentes en Odoo:
+            Candidatos existentes en cartera:
             {cand_text}
         """
 
@@ -216,10 +219,7 @@ class ContactManageNodes:
         var_child_runnable_config.set(config)
         candidates = state.get("current_candidates", [])
         cand_desc = ", ".join(f"[{c['id']}] {c['name']} (Tel: {c.get('phone', 'N/A')})" for c in candidates)
-        question = (
-            f"Se encontraron clientes similares en tu cartera de Odoo: {cand_desc}. "
-            f"¿Deseas actualizar el registro existente ('accept') o cancelar ('reject')?"
-        )
+        question = HITLDialogTemplates.duplicate_contact_question(cand_desc)
 
         user_resume = interrupt({
             "type": "duplicate_customer_conflict",
@@ -245,7 +245,7 @@ class ContactManageNodes:
         """Rama Remove: feedback usuario (confirmación de eliminación/archivado con HITL)."""
         var_child_runnable_config.set(config)
         target_name = state.get("extracted_name") or f"ID {state.get('target_contact_id')}"
-        question = f"¿Estás seguro de que deseas archivar al cliente '{target_name}' de tu cartera de Odoo? ('yes' / 'no')"
+        question = HITLDialogTemplates.remove_contact_question(target_name)
 
         user_resume = interrupt({
             "type": "remove_customer_confirmation",
@@ -273,7 +273,7 @@ class ContactManageNodes:
             return {
                 "operation_result": {
                     "success": False,
-                    "error": "El nombre del cliente es obligatorio para registrarlo en Odoo.",
+                    "error": HITLDialogTemplates.contact_required_name_error(),
                 }
             }
 
@@ -304,7 +304,7 @@ class ContactManageNodes:
             return {
                 "operation_result": {
                     "success": False,
-                    "error": "No se pudo identificar el ID del cliente a archivar en Odoo.",
+                    "error": HITLDialogTemplates.contact_not_found_to_remove(),
                 }
             }
 
@@ -362,13 +362,17 @@ class ContactManageNodes:
             token_counter=len,
         )
 
+        channel_instructions = self.get_channel_prompt_instructions(state)
+
         system_prompt = inject_soul(
-            """
+            f"""
             Directrices de gestión de cartera de clientes:
             - Informa con claridad y cordialidad ejecutiva el resultado de la gestión de clientes.
             - Presenta los clientes ordenadamente con viñetas claras si se solicitaron listas, o confirma las altas/modificaciones con sus nombres y teléfonos.
             - NUNCA menciones términos de backend como 'ERP' u 'Odoo'.
             - NUNCA reveles identificadores técnicos internos como 'user_id' o 'partner_id'.
+
+            {channel_instructions}
             """,
             role=SoulRole.CONTACTS,
         )
@@ -392,7 +396,4 @@ class ContactManageNodes:
             else "\n".join(context_lines)
         )
 
-        return {
-            "final_response": final_text,
-            "messages": [AIMessage(content=final_text)],
-        }
+        return self.format_final_response(final_text, state)

@@ -126,12 +126,28 @@ class WhatsAppService:
             "raw_query": clean_text,
             "user_id": user_id,
             "session_id": session_id,
+            "channel": "whatsapp",
             "messages": [HumanMessage(content=clean_text)],
         }
         config = {"configurable": {"thread_id": session_id}}
 
         try:
-            final_state = await graph.ainvoke(initial_state, config=config)
+            # Comprobar si el hilo tiene un interrupt (HITL) pendiente de confirmación
+            from langgraph.types import Command
+            has_pending_interrupt = False
+            if hasattr(graph, "aget_state"):
+                state_call = graph.aget_state(config)
+                if hasattr(state_call, "__await__"):
+                    thread_state = await state_call
+                    has_pending_interrupt = bool(
+                        thread_state and getattr(thread_state, "tasks", None) and any(t.interrupts for t in thread_state.tasks)
+                    )
+
+            if has_pending_interrupt:
+                logger.info(f"[WhatsAppService] Reanudando interrupt pendiente en {session_id} con respuesta: '{clean_text}'")
+                final_state = await graph.ainvoke(Command(resume=clean_text), config=config)
+            else:
+                final_state = await graph.ainvoke(initial_state, config=config)
         except Exception as exc:
             logger.error(f"[WhatsAppService] Error durante la ejecución del grafo: {exc}", exc_info=True)
             error_msg = "Lo siento, ha ocurrido un error temporal al procesar tu consulta. Por favor intenta nuevamente en unos momentos."
@@ -143,8 +159,20 @@ class WhatsAppService:
                 )
             return error_msg
 
-        # 5. Formatear y sanear la respuesta final conversacional
-        raw_response = final_state.get("final_response") or ""
+        # 5. Extraer respuesta final o pregunta de confirmación HITL (interrupt)
+        if final_state.get("__interrupt__"):
+            interrupts = final_state["__interrupt__"]
+            intr_val = interrupts[0].value if interrupts else {}
+            if isinstance(intr_val, dict) and "question" in intr_val:
+                raw_response = intr_val["question"]
+            elif isinstance(intr_val, dict) and "clarification_question" in intr_val:
+                raw_response = intr_val["clarification_question"]
+            else:
+                raw_response = str(intr_val)
+            logger.info(f"[WhatsAppService] Capturado interrupt HITL conversacional para WhatsApp: '{raw_response}'")
+        else:
+            raw_response = final_state.get("final_response") or ""
+
         clean_response = self._responder.format_response(raw_response)
         if not clean_response:
             clean_response = "Disculpa, no pude generar una respuesta en este momento."

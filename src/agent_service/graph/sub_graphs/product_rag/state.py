@@ -9,6 +9,7 @@ class ProductRagState(TypedDict, total=False):
     messages: Annotated[List[BaseMessage], add_messages]
 
     user_id: Optional[int]
+    channel: Optional[str]
 
     raw_query: str
     refined_query: Optional[str]

@@ -32,11 +32,12 @@ from src.agent_service.graph.sub_graphs.product_recomender.schemas import (
 )
 
 from src.agent_service.soul import inject_soul, SoulRole
+from src.agent_service.graph.base_synthesizer import BaseSynthesizerNode
 
 logger = logging.getLogger(__name__)
 
 
-class ProductRecomenderNodes:
+class ProductRecomenderNodes(BaseSynthesizerNode):
     """Nodos del subgrafo de recomendación de productos con patrón de reflexión y rúbrica."""
 
     def __init__(
@@ -47,6 +48,7 @@ class ProductRecomenderNodes:
         default_top_k: int = 15,
         default_max_iterations: int = 2,
     ):
+        super().__init__(llm=llm)
         self._llm = llm
         self._vector_store = vector_store
         self._odoo_client = odoo_client
@@ -514,28 +516,30 @@ class ProductRecomenderNodes:
                 "que cumplan exactamente con los filtros y especificaciones solicitadas. "
                 "¿Deseas que busquemos en otras categorías o ajustemos el rango de presupuesto?"
             )
-            return {
-                "final_response": msg,
-                "messages": [AIMessage(content=msg)],
-            }
+            return self.format_final_response(msg, state)
 
         rec_lines = []
         for idx, p in enumerate(recommended, start=1):
-            price_str = f"${p.get('price'):.2f}" if p.get("price") is not None else "Consultar precio"
+            price_val = p.get("price")
+            curr = p.get("currency", "PEN")
+            price_str = self.format_currency(price_val, curr) if price_val is not None else "Consultar precio"
             rec_lines.append(
-                f"- [{p.get('sku')}] {p.get('name')}: {price_str} ({p.get('currency', 'PEN')})\n"
+                f"- [{p.get('sku')}] {p.get('name')}: {price_str}\n"
                 f"  * Categoría: {p.get('category') or 'General'}\n"
                 f"  * Detalle: {p.get('description', '')[:220]}"
             )
         recs_text = "\n".join(rec_lines)
+        channel_instructions = self.get_channel_prompt_instructions(state)
 
         system_prompt = inject_soul(
-            """
+            f"""
             Reglas específicas de presentación de recomendaciones:
             - Respeta estrictamente el orden de los productos recomendados que se te entregan (si están ordenados por precio más bajo o ascendente, preséntalos en ese mismo orden exacto sin alterarlo).
             - Presenta cada producto con viñetas claras incluyendo su SKU entre corchetes (ej: **[6189]**), nombre comercial y precio oficial con su divisa.
             - Explica brevemente por qué es una excelente recomendación (por qué combina, complementa o representa una alternativa de gran valor).
             - Invita con sutileza consultiva al usuario a agregar alguno de los productos a su cotización si lo desea.
+
+            {channel_instructions}
             """,
             role=SoulRole.RECOMMENDER,
         )
@@ -562,7 +566,4 @@ class ProductRecomenderNodes:
         if not resp_text:
             resp_text = f"Aquí tienes las mejores opciones recomendadas para tu consulta:\n\n{recs_text}"
 
-        return {
-            "final_response": resp_text,
-            "messages": [AIMessage(content=resp_text)],
-        }
+        return self.format_final_response(resp_text, state)

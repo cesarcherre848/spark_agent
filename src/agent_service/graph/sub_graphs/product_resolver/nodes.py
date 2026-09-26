@@ -22,11 +22,12 @@ from src.agent_service.tools.product_tools import (
 
 from src.agent_service.core.llms import bind_temperature, bind_structured_output
 from src.agent_service.soul import inject_soul, SoulRole
+from src.agent_service.graph.base_synthesizer import BaseSynthesizerNode
 
 logger = logging.getLogger(__name__)
 
 
-class ProductResolverNodes:
+class ProductResolverNodes(BaseSynthesizerNode):
     """Nodos del subgrafo product_resolver implementando el flujo del .drawio y soporte HITL."""
 
     def __init__(
@@ -42,6 +43,7 @@ class ProductResolverNodes:
             ]
         ] = None,
     ):
+        super().__init__(llm=llm)
         self._llm = llm
         self._product_tool = product_tool
         self._ownership_tool = ownership_tool
@@ -413,19 +415,25 @@ class ProductResolverNodes:
                 subtotal = p.get("subtotal", 0.0)
                 currency = p.get("currency", "PEN")
                 total_partner += subtotal
+                price_fmt = self.format_currency(price, currency)
+                subtotal_fmt = self.format_currency(subtotal, currency)
                 lines.append(
                     f"- SKU: {p.get('sku')} | {p.get('name')} | Cant: {qty} {p.get('uom', 'Units')} | "
-                    f"P.Unit: {price} {currency} | Subtotal: {subtotal:.2f} {currency}"
+                    f"P.Unit: {price_fmt} | Subtotal: {subtotal_fmt}"
                 )
-            lines.append(f"**Total Proveedor:** {total_partner:.2f} {currency}\n")
+            total_fmt = self.format_currency(total_partner, currency)
+            lines.append(f"**Total Proveedor:** {total_fmt}\n")
 
         context_text = "\n".join(lines) if lines else "No se cotizaron productos específicos en este turno."
+        channel_instructions = self.get_channel_prompt_instructions(state)
 
         system_prompt = inject_soul(
-            """
+            f"""
             Tareas de cotización multimarca:
             - Si hay productos cotizados por proveedor: Organízalos claramente por proveedor con cantidades, precios unitarios y subtotales en formato limpio y estructurado.
             - Si no hay productos cotizados (ej. el cliente hizo una pregunta, solicitó códigos o la información fue insuficiente para cotizar): Responde con amabilidad aclarando sus dudas a partir del historial, indícale los códigos SKU disponibles si los conoces o explícale con claridad cómo puede solicitarlos para cotizar.
+
+            {channel_instructions}
             """,
             role=SoulRole.QUOTATION,
         )
@@ -463,8 +471,8 @@ class ProductResolverNodes:
                 )
         memory_to_save = f"Cotización realizada: {', '.join(recap_items)}." if recap_items else None
 
-        return {
-            "final_response": final_text,
-            "messages": [AIMessage(content=final_text)],
-            "memory_to_save": memory_to_save,
-        }
+        return self.format_final_response(
+            final_text,
+            state=state,
+            extra={"memory_to_save": memory_to_save},
+        )

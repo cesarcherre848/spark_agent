@@ -52,6 +52,7 @@ def mock_resolver():
 @pytest.fixture
 def mock_graph():
     graph = MagicMock()
+    graph.aget_state = AsyncMock(return_value=None)
     graph.ainvoke = AsyncMock(return_value={
         "final_response": "Hola, el precio del SKU 1 es S/ 35.00 con stock disponible.",
         "intent": "resolver",

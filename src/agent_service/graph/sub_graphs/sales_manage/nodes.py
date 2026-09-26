@@ -28,6 +28,8 @@ from src.agent_service.core.hitl.parser import (
     parse_hitl_entity_selection,
     parse_hitl_order_choice,
 )
+from src.agent_service.core.templates.dialogs import HITLDialogTemplates
+from src.agent_service.graph.base_synthesizer import BaseSynthesizerNode
 from src.agent_service.tools.sales_tools import (
     normalize_order_name,
     extract_order_code,
@@ -63,7 +65,7 @@ def _customers_match(name1: Optional[str], name2: Optional[str]) -> bool:
     return len(common) > 0
 
 
-class SalesManageNodes:
+class SalesManageNodes(BaseSynthesizerNode):
     """Nodos del subgrafo de gestión de ventas, órdenes y cotizaciones en Odoo ERP."""
 
     def __init__(
@@ -82,6 +84,7 @@ class SalesManageNodes:
         list_customers_tool: Callable[..., Awaitable[List[Dict[str, Any]]]] = odoo_list_current_customers,
         upsert_customer_tool: Callable[..., Awaitable[Dict[str, Any]]] = odoo_upsert_customer,
     ):
+        super().__init__(llm=llm)
         self._llm = llm
         self._list_orders_tool = list_orders_tool
         self._list_current_orders_tool = list_current_orders_tool
@@ -121,7 +124,7 @@ class SalesManageNodes:
         )
 
         system_prompt = """
-            Eres un asistente comercial de ventas para Odoo ERP.
+            Eres un asistente comercial de ventas.
             Tu misión es analizar la solicitud del vendedor y el contexto conversacional reciente para extraer de forma estructurada:
             
             1. 'action':
@@ -145,10 +148,10 @@ class SalesManageNodes:
                  * 'subtract': Si se desea restar, reducir o quitar una cantidad parcial de unidades (ej: 'elimina 2 items de 6189', 'quita 2 unidades del Delineador', 'resta 1 unidad').
                - 'price_unit': Precio unitario acordado si se especificó explícitamente.
             4. 'status': Estado comercial específico ÚNICAMENTE si el usuario lo restringe de forma explícita:
-               - 'draft': si pide expresamente 'cotizaciones', 'presupuestos' o 'en borrador' (ej: 'cuáles cotizaciones tengo abiertas').
+               - 'draft': si pide expresamente 'cotizaciones', 'cotizaciones activas', 'presupuestos' o 'en borrador' (ej: 'solo muestrame las cotizaciones activas', 'cuáles cotizaciones tengo abiertas').
                - 'sale': únicamente si pide expresamente 'pedidos confirmados', 'órdenes aprobadas' o 'ventas cerradas'.
-               - 'cancel': si pide expresamente 'canceladas' o 'anuladas'.
-               - None: si el usuario utiliza términos generales como 'pedidos', 'mis pedidos', 'cómo van los pedidos de X', 'órdenes', 'mis órdenes', 'qué tengo con X' (sin especificar si son borradores o confirmadas), deja 'status' como None para consultar tanto cotizaciones como pedidos confirmados y cancelados.
+               - 'cancel': únicamente si pide expresamente 'canceladas', 'anuladas' o 'descartadas' (ej: 'muéstrame las canceladas', 'cuáles órdenes fueron anuladas').
+               - None: si el usuario utiliza términos generales como 'pedidos', 'mis pedidos', 'cómo van los pedidos de X', 'órdenes', 'mis órdenes', 'qué tengo con X' (sin restringir si son borradores o confirmadas).
             5. 'period': Si se especifica periodo temporal ('hoy', 'este mes', 'semana').
             6. 'order_name': Si se especifica un código o número de orden comercial (ej: '03', 'SO001', 'S00003').
         """
@@ -563,10 +566,7 @@ class SalesManageNodes:
         var_child_runnable_config.set(config)
         user_id = int(state.get("user_id") or 5)
         cust_name = state.get("customer_name") or "el cliente"
-        question = (
-            f"El cliente '{cust_name}' no se encuentra en tu cartera comercial de Odoo. "
-            f"¿Deseas darlo de alta en este momento para continuar con la venta?"
-        )
+        question = HITLDialogTemplates.unknown_customer_question(cust_name)
 
         user_resume = interrupt({
             "type": "unknown_customer_conflict",
@@ -706,7 +706,7 @@ class SalesManageNodes:
         cand_text = "\n".join(cand_lines_str)
 
         system_prompt = """
-            Eres un auditor de órdenes de venta para Odoo ERP.
+            Eres un auditor de órdenes de venta.
             Evalúa si los productos que el vendedor desea agregar o cotizar coinciden o podrían corresponder
             a una de las cotizaciones ya abiertas para este cliente, evitando órdenes huérfanas o duplicadas.
 
@@ -720,7 +720,7 @@ class SalesManageNodes:
             Ítems solicitados en la consulta actual:
             {items_desc or 'Productos varios'}
 
-            Cotizaciones abiertas en Odoo para este cliente:
+            Cotizaciones abiertas para este cliente:
             {cand_text}
         """
 
@@ -955,11 +955,7 @@ class SalesManageNodes:
         """Rama Edit Order: Guardrail HITL en lenguaje natural antes de desbloquear pedido confirmado."""
         var_child_runnable_config.set(config)
         order_name = state.get("target_order_name") or "la orden"
-        question = (
-            f"El pedido {order_name} ya está confirmado y bloqueado en Odoo. "
-            f"Para modificar sus productos es necesario desbloquearlo primero. "
-            f"¿Deseas desbloquearlo y aplicar las modificaciones?"
-        )
+        question = HITLDialogTemplates.unlock_order_question(order_name)
 
         user_resume = interrupt({
             "type": "unlock_order_guardrail",
@@ -1010,7 +1006,7 @@ class SalesManageNodes:
         """Rama Remove: Confirmación HITL en lenguaje natural antes de cancelar."""
         var_child_runnable_config.set(config)
         order_name = state.get("target_order_name") or "la orden seleccionada"
-        question = f"¿Estás seguro de que deseas cancelar la orden {order_name} en Odoo?"
+        question = HITLDialogTemplates.remove_order_question(order_name)
 
         user_resume = interrupt({
             "type": "remove_order_confirmation",
@@ -1036,7 +1032,7 @@ class SalesManageNodes:
             return {
                 "operation_result": {
                     "success": False,
-                    "error": "No se identificó la orden a cancelar en Odoo.",
+                    "error": HITLDialogTemplates.order_not_found_to_cancel(),
                 }
             }
 
@@ -1065,8 +1061,10 @@ class SalesManageNodes:
         view_data = state.get("order_view_data") or {}
         orders_list = state.get("orders_list") or {}
 
+        channel_instructions = self.get_channel_prompt_instructions(state)
+
         system_prompt = inject_soul(
-            """
+            f"""
             Directrices específicas de gestión de órdenes y pedidos:
             - NUNCA menciones códigos internos como 'user_id', 'partner_id' ni IDs numéricos de base de datos.
             - NUNCA menciones términos de backend como 'ERP' u 'Odoo'.
@@ -1081,6 +1079,8 @@ class SalesManageNodes:
             - Si es una cotización creada o actualizada, resume los productos incluidos, subtotal, impuestos y total general.
             - Si es una confirmación de pedido, celebra la venta con entusiasmo profesional y sobrio.
             - Si es una cancelación, confirma cordialmente que la orden ha sido cancelada.
+
+            {channel_instructions}
             """,
             role=SoulRole.SALES_ORDERS,
         )
@@ -1125,52 +1125,66 @@ class SalesManageNodes:
             cust = state.get("customer_name") or op_res.get("customer_name") or view_data.get("customer_name")
             
             if op_res.get("success") is False:
-                err = op_res.get("error") or "No se pudo procesar la operación en Odoo."
+                err = op_res.get("error") or "No se pudo procesar la operación en el sistema."
                 resp_text = f"No se pudo completar la operación{' para ' + cust if cust else ''}: {err}"
             elif action in ("upsert", "create") or op_res.get("action") == "created":
                 tot = op_res.get("amount_total") or view_data.get("amount_total") or 0.0
                 ord_str = f" **{target_name}**" if target_name else ""
                 cust_str = f" para **{cust}**" if cust else ""
-                resp_text = f"Se ha creado exitosamente la cotización{ord_str}{cust_str} por un total de **S/ {tot:.2f}**."
+                resp_text = f"Se ha creado exitosamente la cotización{ord_str}{cust_str} por un total de **{self.format_currency(tot, 'PEN')}**."
             elif action in ("add_items", "remove_items", "update") or op_res.get("action") == "updated":
                 tot = op_res.get("amount_total") or view_data.get("amount_total") or 0.0
                 ord_str = f" **{target_name}**" if target_name else ""
                 cust_str = f" para **{cust}**" if cust else ""
-                resp_text = f"Se ha actualizado exitosamente la cotización{ord_str}{cust_str}. El nuevo total es **S/ {tot:.2f}**."
+                resp_text = f"Se ha actualizado exitosamente la cotización{ord_str}{cust_str}. El nuevo total es **{self.format_currency(tot, 'PEN')}**."
             elif action == "list" or orders_list:
                 # Manejador determinista y profesional para listados
+                status_filter = state.get("status_filter")
                 draft_orders = orders_list.get("draft", []) if isinstance(orders_list, dict) else []
                 sale_orders = orders_list.get("sale", []) if isinstance(orders_list, dict) else []
                 cancel_orders = orders_list.get("cancel", []) if isinstance(orders_list, dict) else []
 
-                parts = []
-                if cust:
-                    header = f"Aquí tienes el estado de las cotizaciones y pedidos de **{cust}** en Odoo:"
-                else:
-                    header = "Aquí tienes el listado general de tus cotizaciones y pedidos en Odoo:"
-                parts.append(header)
+                # Reglas de visibilidad:
+                # 1. Por defecto, solo se muestran cotizaciones y pedidos confirmados (activos).
+                # 2. Las órdenes canceladas NUNCA se muestran por defecto; SOLO si el usuario lo solicita expresamente.
+                st_norm = (status_filter or "").lower().strip()
+                show_draft = st_norm in ("", "draft", "cotizacion", "cotizaciones")
+                show_sale = st_norm in ("", "sale", "confirmado", "confirmados", "aprobado", "aprobados")
+                show_cancel = st_norm in ("cancel", "cancelado", "cancelados", "anulado", "anulados")
 
-                if draft_orders:
-                    parts.append("\n### 📋 Cotizaciones en Borrador")
+                parts = [HITLDialogTemplates.order_list_header(cust, status_filter=status_filter)]
+                has_content = False
+
+                if show_draft and draft_orders:
+                    has_content = True
+                    parts.append("\n### 📋 Cotizaciones en Borrador (Activas)")
                     for o in draft_orders:
                         lines_desc = ""
                         if o.get("lines"):
                             lines_desc = " (" + ", ".join(f"{l.get('quantity', 1):.0f}x {l.get('product_name', '')}" for l in o["lines"]) + ")"
-                        parts.append(f"* **{o.get('name')}** | Cliente: **{o.get('customer_name')}** | Total: **S/ {o.get('amount_total', 0.0):.2f}**{lines_desc}")
+                        parts.append(f"* **{o.get('name')}** | Cliente: **{o.get('customer_name')}** | Total: **{self.format_currency(o.get('amount_total', 0.0), 'PEN')}**{lines_desc}")
 
-                if sale_orders:
+                if show_sale and sale_orders:
+                    has_content = True
                     parts.append("\n### ✅ Pedidos Confirmados")
                     for o in sale_orders:
-                        parts.append(f"* **{o.get('name')}** | Cliente: **{o.get('customer_name')}** | Total: **S/ {o.get('amount_total', 0.0):.2f}**")
+                        parts.append(f"* **{o.get('name')}** | Cliente: **{o.get('customer_name')}** | Total: **{self.format_currency(o.get('amount_total', 0.0), 'PEN')}**")
 
-                if cancel_orders:
+                if show_cancel and cancel_orders:
+                    has_content = True
                     parts.append("\n### 🚫 Órdenes Canceladas")
                     for o in cancel_orders:
-                        parts.append(f"* **{o.get('name')}** | Cliente: **{o.get('customer_name')}** | Total: **S/ {o.get('amount_total', 0.0):.2f}**")
+                        parts.append(f"* **{o.get('name')}** | Cliente: **{o.get('customer_name')}** | Total: **{self.format_currency(o.get('amount_total', 0.0), 'PEN')}**")
 
-                if not draft_orders and not sale_orders and not cancel_orders:
-                    target_str = f" para **{cust}**" if cust else ""
-                    parts = [f"Actualmente no se encontraron pedidos ni cotizaciones registradas en Odoo{target_str}."]
+                if not has_content:
+                    parts = [
+                        HITLDialogTemplates.order_list_empty(
+                            customer_name=cust,
+                            status_filter=status_filter,
+                            has_cancelled=len(cancel_orders) > 0,
+                            cancel_count=len(cancel_orders),
+                        )
+                    ]
 
                 resp_text = "\n".join(parts)
             elif action == "view" and view_data:
@@ -1178,16 +1192,14 @@ class SalesManageNodes:
                 v_cust = view_data.get("customer_name") or cust or ""
                 v_tot = view_data.get("amount_total", 0.0)
                 v_lines = view_data.get("lines", [])
-                parts = [f"Detalle de cotización **{v_name}** de **{v_cust}** (Total: **S/ {v_tot:.2f}**):"]
+                parts = [f"Detalle de cotización **{v_name}** de **{v_cust}** (Total: **{self.format_currency(v_tot, 'PEN')}**):"]
                 for l in v_lines:
-                    parts.append(f"* {l.get('quantity', 1):.0f}x {l.get('product_name', '')} a S/ {l.get('price_unit', 0.0):.2f}")
+                    p_unit = self.format_currency(l.get('price_unit', 0.0), 'PEN')
+                    parts.append(f"* {l.get('quantity', 1):.0f}x {l.get('product_name', '')} a {p_unit}")
                 resp_text = "\n".join(parts)
             else:
                 cust_str = f" para **{cust}**" if cust else ""
                 ord_str = f" ({target_name})" if target_name else ""
-                resp_text = f"Detalle de consulta comercial en Odoo{cust_str}{ord_str}."
+                resp_text = f"Detalle de consulta comercial{cust_str}{ord_str}."
 
-        return {
-            "final_response": resp_text,
-            "messages": [AIMessage(content=resp_text)],
-        }
+        return self.format_final_response(resp_text, state)

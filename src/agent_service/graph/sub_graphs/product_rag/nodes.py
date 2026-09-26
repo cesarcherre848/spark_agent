@@ -15,9 +15,10 @@ from src.agent_service.graph.sub_graphs.product_rag.schemas import (
 from src.agent_service.graph.sub_graphs.product_rag.state import ProductRagState
 from src.agent_service.core.llms import bind_temperature, bind_structured_output
 from src.agent_service.soul import inject_soul, SoulRole
+from src.agent_service.graph.base_synthesizer import BaseSynthesizerNode
 
 
-class ProductRagNodes:
+class ProductRagNodes(BaseSynthesizerNode):
     def __init__(
         self,
         llm: BaseChatModel,
@@ -25,6 +26,7 @@ class ProductRagNodes:
         top_k: int = 5,
         default_max_iterations: int = 2,
     ):
+        super().__init__(llm=llm)
         self._llm = llm
         self._vector_store = vector_store
         self._top_k = top_k
@@ -241,13 +243,17 @@ class ProductRagNodes:
             token_counter=len,
         )
 
+        channel_instructions = self.get_channel_prompt_instructions(state)
+
         system_prompt = inject_soul(
-            """
+            f"""
             Tareas de presentación del catálogo:
             - Si hay productos seleccionados: Recomienda de forma clara las opciones pertinentes, mencionando siempre su NOMBRE y CÓDIGO SKU oficial (ej: '1. **Nombre del Producto** (Código SKU: [X]): ...'). Explica sus beneficios clave.
             - Si no hay productos disponibles o is_sufficient es False: Explica amablemente que no disponemos de ese artículo exacto en este momento y sugiere alternativas afines.
             - No inventes características, precios ni especificaciones ausentes en los candidatos.
             - Informa con sutileza consultiva al cliente que si desea cotizar o consultar precios de estas opciones, con gusto podemos procesar los códigos SKU recomendados.
+
+            {channel_instructions}
             """,
             role=SoulRole.CATALOG_RAG,
         )
@@ -285,7 +291,4 @@ class ProductRagNodes:
                     "¿Deseas buscar con otros términos o en otra categoría?"
                 )
 
-        return {
-            "final_response": final_text,
-            "messages": [AIMessage(content=final_text)],
-        }
+        return self.format_final_response(final_text, state)

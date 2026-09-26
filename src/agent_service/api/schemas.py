@@ -26,6 +26,10 @@ class WebhookRequest(BaseModel):
         validation_alias=AliasChoices("session_id", "thread_id", "conversation_id"),
         description="ID de conversación o hilo opcional. Si no se provee, se deriva del teléfono.",
     )
+    channel: Optional[str] = Field(
+        default=None,
+        description="Canal de comunicación opcional ('whatsapp', 'web', 'other').",
+    )
 
     @field_validator("raw_query")
     @classmethod

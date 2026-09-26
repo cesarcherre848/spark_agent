@@ -24,6 +24,7 @@ from langgraph.checkpoint.memory import MemorySaver
 
 from src.agent_service.core.llms.factory import get_default_llm, extract_clean_text
 from src.agent_service.core.llms import bind_temperature, bind_structured_output
+from src.agent_service.graph.base_synthesizer import BaseSynthesizerNode
 from src.agent_service.config.database import get_db_pool
 from src.agent_service.core.embeddings.factory import get_embedding_service
 from src.agent_service.graph.sub_graphs.user_memory.store import UserMemoryStore
@@ -71,6 +72,7 @@ class MainGraphState(TypedDict, total=False):
     user_id: Optional[Union[int, str]]
     raw_query: Optional[str]
     session_id: Optional[str]
+    channel: Optional[Literal["whatsapp", "web", "other"]]
 
     # Guardrail de entrada y seguridad
     is_blocked: Optional[bool]
@@ -380,9 +382,10 @@ def create_general_chat_node(llm: BaseChatModel):
 
         user_context = state.get("user_context")
         context_block = f"\nAntecedentes del usuario:\n{user_context}\n" if user_context else ""
+        channel_instructions = BaseSynthesizerNode.get_channel_prompt_instructions(state)
 
         response = await chat_model.ainvoke([
-            SystemMessage(content=system_prompt),
+            SystemMessage(content=f"{system_prompt}\n\n{channel_instructions}"),
             *trimmed_history,
             HumanMessage(content=f"{context_block}{raw_query}"),
         ])
@@ -392,10 +395,7 @@ def create_general_chat_node(llm: BaseChatModel):
         if state.get("is_warning") and guardrail_warning and guardrail_warning not in reply_text:
             reply_text = f"{guardrail_warning}\n\n{reply_text}"
 
-        return {
-            "final_response": reply_text,
-            "messages": [AIMessage(content=reply_text)],
-        }
+        return BaseSynthesizerNode.format_final_response(reply_text, state)
 
 
     return general_chat_node

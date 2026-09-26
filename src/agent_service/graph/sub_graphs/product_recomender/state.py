@@ -2,7 +2,7 @@
 src/agent_service/graph/sub_graphs/product_recomender/state.py - Estado de LangGraph para product_recomender
 """
 
-from typing import Optional, List, Dict, Any, Union, Annotated
+from typing import Optional, List, Dict, Any, Union, Annotated, Literal
 from typing_extensions import TypedDict
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
@@ -15,6 +15,7 @@ class ProductRecomenderState(TypedDict, total=False):
     user_id: Optional[Union[int, str]]
     raw_query: Optional[str]
     session_id: Optional[str]
+    channel: Optional[Literal["whatsapp", "web", "other"]]
 
     # Extracción de intención y parámetros
     base_product: Optional[str]               # SKU o nombre del producto base (ej: '6189', 'Sexy Glam')

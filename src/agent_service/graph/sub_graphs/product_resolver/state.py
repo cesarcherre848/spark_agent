@@ -1,4 +1,4 @@
-from typing import Annotated, Dict, Any, List, Optional
+from typing import Annotated, Dict, Any, List, Optional, Literal
 from typing_extensions import TypedDict
 from langgraph.graph.message import add_messages
 
@@ -15,6 +15,7 @@ class ProductResolverState(TypedDict, total=False):
     messages: Annotated[list, add_messages]     # Historial conversacional y avisos HITL
     user_id: str                                # ID del usuario para validar pertenencia (ownership)
     raw_query: Optional[str]                    # Consulta original del usuario
+    channel: Optional[Literal["whatsapp", "web", "other"]]  # Canal de comunicación
 
     items: Dict[str, SKUItem]                   # Diccionario indexado por SKU: {"SKU-101": SKUItem, ...}
 

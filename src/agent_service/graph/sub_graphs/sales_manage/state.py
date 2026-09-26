@@ -14,6 +14,7 @@ class SalesManageState(TypedDict, total=False):
     raw_query: Optional[str]
     user_id: Optional[Union[int, str]]
     session_id: Optional[str]
+    channel: Optional[Literal["whatsapp", "web", "other"]]
 
     # Extracción de intención y atributos
     sales_action: Optional[Literal["list", "view", "upsert", "add_items", "remove_items", "confirm", "edit_order", "remove"]]
