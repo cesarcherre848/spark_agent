@@ -67,8 +67,9 @@ def test_router_decision_schema_valid():
 
 
 def test_route_after_router_helper():
-    assert _route_after_router({"intent": "rag"}) == "product_rag"
-    assert _route_after_router({"intent": "recommender"}) == "product_recomender"
+    assert _route_after_router({"intent": "advisor"}) == "product_advisor"
+    assert _route_after_router({"intent": "rag"}) == "product_advisor"
+    assert _route_after_router({"intent": "recommender"}) == "product_advisor"
     assert _route_after_router({"intent": "resolver"}) == "product_resolver"
     assert _route_after_router({"intent": "contact"}) == "contact_manage"
     assert _route_after_router({"intent": "sales"}) == "sales_manage"

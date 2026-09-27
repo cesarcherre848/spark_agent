@@ -93,3 +93,11 @@ def format_products_for_advisor_prompt(products: List[Any], max_desc_len: int = 
     from src.agent_service.graph.base_synthesizer import BaseSynthesizerNode
     return BaseSynthesizerNode.format_products_context(products, max_desc_len=max_desc_len)
 
+
+class FinalAnswer(BaseModel):
+    """Borrador o respuesta final comercial generada por el sintetizador."""
+    response_text: str = Field(
+        description="Respuesta comercial y técnica orientada al cliente explicando las opciones recomendadas o disculpándose cordialmente si no hay disponibilidad."
+    )
+
+

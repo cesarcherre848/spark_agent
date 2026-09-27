@@ -33,7 +33,7 @@ from src.agent_service.graph.sub_graphs.product_advisor.graph import (
     _route_after_rubric,
 )
 from src.agent_service.graph.sub_graphs.product_advisor.state import ProductAdvisorState
-from src.agent_service.graph.sub_graphs.product_rag.schemas import FinalAnswer
+from src.agent_service.graph.sub_graphs.product_advisor.schemas import FinalAnswer
 
 
 def test_advisor_plan_and_rubric_schemas():

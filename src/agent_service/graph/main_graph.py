@@ -5,7 +5,7 @@ Integra los tres módulos fundamentales del sistema:
 1. Memoria a largo plazo (user_memory) con PostgreSQL y pgvector.
 2. Enrutador inteligente (LLM temp=0.0) hacia:
    - general_chat (charla general y asistencia)
-   - product_rag (búsqueda semántica en catálogo)
+   - product_advisor (asesor comercial de productos y recomendaciones)
    - product_resolver (cotizaciones de SKUs, Odoo ERP y HITL)
 3. Guardado automático de cotizaciones en memoria semántica.
 """
@@ -34,10 +34,6 @@ from src.agent_service.graph.sub_graphs.product_resolver.graph import (
     build_product_resolver_graph,
     get_product_resolver_graph,
 )
-from src.agent_service.graph.sub_graphs.product_rag.graph import (
-    build_rag_product_graph,
-    get_product_rag_graph,
-)
 from src.agent_service.graph.sub_graphs.contact_manage.graph import (
     build_contact_manage_graph,
     get_contact_manage_graph,
@@ -45,10 +41,6 @@ from src.agent_service.graph.sub_graphs.contact_manage.graph import (
 from src.agent_service.graph.sub_graphs.sales_manage.graph import (
     build_sales_manage_graph,
     get_sales_manage_graph,
-)
-from src.agent_service.graph.sub_graphs.product_recomender.graph import (
-    build_product_recomender_graph,
-    get_product_recomender_graph,
 )
 from src.agent_service.graph.sub_graphs.product_advisor.graph import (
     build_product_advisor_graph,
@@ -111,7 +103,7 @@ class MainGraphState(TypedDict, total=False):
     saved_memory_id: Optional[int]
     clarification_count: int
 
-    # Pasamanos de product_rag y product_advisor:
+    # Pasamanos unificado de product_advisor:
     refined_query: Optional[str]
     retrieved_products: List[Any]
     is_sufficient: bool
@@ -119,54 +111,15 @@ class MainGraphState(TypedDict, total=False):
     customer_purchase_history: Optional[Dict[str, Any]]
     plan_rationale: Optional[str]
     planned_tools: Optional[List[Dict[str, Any]]]
-
-    # Pasamanos de contact_manage:
-    contact_action: Optional[Literal["list", "upsert", "remove"]]
-    extracted_name: Optional[str]
-    extracted_phones: Optional[List[str]]
-    target_contact_id: Optional[int]
-    customers_list: Optional[List[Dict[str, Any]]]
-    current_candidates: Optional[List[Dict[str, Any]]]
-    has_possible_duplicates: Optional[bool]
-    duplicate_rationale: Optional[str]
-    upsert_confirmed: Optional[bool]
-    remove_confirmed: Optional[bool]
-    operation_result: Optional[Dict[str, Any]]
-
-    # Pasamanos de sales_manage:
-    sales_action: Optional[Literal["list", "view", "upsert", "add_items", "remove_items", "confirm", "edit_order", "remove"]]
-    customer_name: Optional[str]
-    partner_id: Optional[int]
-    candidate_partners: Optional[List[Dict[str, Any]]]
-    customer_resolved: Optional[bool]
-    customer_not_found: Optional[bool]
-    orders_list: Optional[Dict[str, List[Dict[str, Any]]]]
-    duplicate_choice: Optional[Literal["new", "selected", "cancel"]]
-    target_order_name: Optional[str]
-    target_order_id: Optional[int]
-    unlock_confirmed: Optional[bool]
-    order_view_data: Optional[Dict[str, Any]]
-    cancellation_reason: Optional[str]
-    is_intent_clear: Optional[bool]
-    reflection_reasoning: Optional[str]
-    clarification_question: Optional[str]
-    clarification_options: Optional[List[str]]
-
-
-    # Pasamanos de product_recomender:
-    recommendation_type: Optional[str]
-    target_top_k: Optional[int]
-    base_product_name: Optional[str]
-    base_product_sku: Optional[str]
-    max_price_budget: Optional[float]
-    min_price_budget: Optional[float]
     candidate_products: Optional[List[Any]]
     enriched_products: Optional[List[Any]]
     filtered_products: Optional[List[Any]]
     meets_rubric: Optional[bool]
     rubric_scores: Optional[Dict[str, Any]]
-    rubric_reasoning: Optional[str]
-    recommended_products: Optional[List[Dict[str, Any]]]
+    critique: Optional[str]
+    suggested_improvements: Optional[List[str]]
+    iteration_count: Optional[int]
+    draft_response: Optional[str]
 
 
 # ==============================================================================
@@ -463,12 +416,10 @@ def create_general_chat_node(llm: BaseChatModel):
 # ==============================================================================
 def _route_after_router(state: MainGraphState) -> Literal[
     "general_chat",
-    "product_rag",
+    "product_advisor",
     "product_resolver",
     "contact_manage",
     "sales_manage",
-    "product_recomender",
-    "product_advisor",
     "guardrail_blocked",
 ]:
     """Enrutamiento condicional según la intención detectada."""
@@ -477,12 +428,8 @@ def _route_after_router(state: MainGraphState) -> Literal[
         if state.get("is_warning"):
             return "general_chat"
         return "guardrail_blocked"
-    elif intent in ("advisor", "product_advisor"):
+    elif intent in ("advisor", "product_advisor", "rag", "recommender"):
         return "product_advisor"
-    elif intent == "rag":
-        return "product_rag"
-    elif intent == "recommender":
-        return "product_recomender"
     elif intent == "resolver":
         return "product_resolver"
     elif intent == "contact":
@@ -495,13 +442,13 @@ def _route_after_router(state: MainGraphState) -> Literal[
 def build_main_graph(
     llm: BaseChatModel,
     resolver_graph: Optional[Any] = None,
-    rag_graph: Optional[Any] = None,
     contact_graph: Optional[Any] = None,
     sales_graph: Optional[Any] = None,
-    recommender_graph: Optional[Any] = None,
     advisor_graph: Optional[Any] = None,
     memory_store: Optional[UserMemoryStore] = None,
     checkpointer: Optional[BaseCheckpointSaver] = None,
+    rag_graph: Optional[Any] = None,
+    recommender_graph: Optional[Any] = None,
 ):
     """Construye y compila el Grafo Principal unificado con guardrails, memoria, router y subgrafos."""
     workflow = StateGraph(state_schema=MainGraphState)
@@ -531,12 +478,10 @@ def build_main_graph(
     compiled_resolver = resolver_graph if resolver_graph is not None else get_product_resolver_graph()
     compiled_advisor = (
         advisor_graph if advisor_graph is not None
-        else get_product_advisor_graph()
+        else (rag_graph if rag_graph is not None else (recommender_graph if recommender_graph is not None else get_product_advisor_graph()))
     )
-    compiled_rag = rag_graph if rag_graph is not None else compiled_advisor
     compiled_contact = contact_graph if contact_graph is not None else get_contact_manage_graph()
     compiled_sales = sales_graph if sales_graph is not None else get_sales_manage_graph()
-    compiled_recommender = recommender_graph if recommender_graph is not None else compiled_advisor
 
     # Registro de nodos en el grafo
     workflow.add_node("input_guardrail", input_guardrail)
@@ -545,8 +490,6 @@ def build_main_graph(
     workflow.add_node("router", router_node)
     workflow.add_node("general_chat", general_node)
     workflow.add_node("product_advisor", compiled_advisor)
-    workflow.add_node("product_rag", compiled_rag)
-    workflow.add_node("product_recomender", compiled_recommender)
     workflow.add_node("product_resolver", compiled_resolver)
     workflow.add_node("contact_manage", compiled_contact)
     workflow.add_node("sales_manage", compiled_sales)
@@ -573,8 +516,6 @@ def build_main_graph(
         _route_after_router,
         {
             "general_chat": "general_chat",
-            "product_rag": "product_rag",
-            "product_recomender": "product_recomender",
             "product_advisor": "product_advisor",
             "product_resolver": "product_resolver",
             "contact_manage": "contact_manage",
@@ -587,8 +528,6 @@ def build_main_graph(
     workflow.add_edge("guardrail_blocked", END)
     workflow.add_edge("general_chat", END)
     workflow.add_edge("product_advisor", END)
-    workflow.add_edge("product_rag", END)
-    workflow.add_edge("product_recomender", END)
     workflow.add_edge("product_resolver", "save_memory")
     workflow.add_edge("contact_manage", END)
     workflow.add_edge("sales_manage", END)

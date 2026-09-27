@@ -229,7 +229,7 @@ class TestRouterGuardrail:
 
     def test_route_after_router_out_of_scope(self):
         assert _route_after_router({"intent": "out_of_scope"}) == "guardrail_blocked"
-        assert _route_after_router({"intent": "rag"}) == "product_rag"
+        assert _route_after_router({"intent": "advisor"}) == "product_advisor"
         assert _route_after_router({"intent": "general"}) == "general_chat"
 
 

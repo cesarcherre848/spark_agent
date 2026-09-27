@@ -4,11 +4,9 @@ import torch
 from dotenv import load_dotenv
 from psycopg_pool import AsyncConnectionPool
 from langchain_huggingface import HuggingFaceEmbeddings
-from unittest.mock import MagicMock
-from langchain_core.language_models.chat_models import BaseChatModel
 
 from src.agent_service.core.stores.product.vector_store import ProductVectorStore
-from src.agent_service.graph.sub_graphs.product_rag.nodes import ProductRagNodes
+from src.agent_service.core.stores.product.schemas import ProductCatalogFilter
 
 load_dotenv(".env.dev")
 
@@ -52,27 +50,14 @@ async def test_retrieve_products_with_real_database(db_conninfo, embedding_servi
             embedding_column="embedding_1024",
         )
 
-        mock_llm = MagicMock(spec=BaseChatModel)
-        mock_llm.with_structured_output.return_value = MagicMock()
-
-        nodes = ProductRagNodes(llm=mock_llm, vector_store=vector_store, top_k=20)
-
-        state = {
-            "raw_query": "Perfumes con aroma a rosas",
-            "refined_query": None,
-            "iteration_count": 0,
-        }
-
-        # Ejecutar retrieve_products contra la base de datos real
-        result = await nodes.retrieve_products(state)
-
-        print(result)
+        # Ejecutar búsqueda híbrida contra la base de datos real
+        docs = await vector_store.ahybrid_search(
+            query="Perfumes con aroma a rosas",
+            k=20,
+        )
 
         # Verificaciones
-        assert "retrieved_products" in result, "El resultado debe contener la clave 'retrieved_products'"
-        docs = result["retrieved_products"]
         assert len(docs) > 0, "Se esperaba encontrar productos en la base de datos"
-        assert result["iteration_count"] == 1, "iteration_count debe incrementarse a 1"
 
         # Verificar estructura de los documentos retornados
         for doc in docs:
@@ -101,21 +86,16 @@ async def test_retrieve_products_with_metadata_tags_real_db(db_conninfo, embeddi
             embedding_column="embedding_1024",
         )
 
-        mock_llm = MagicMock(spec=BaseChatModel)
-        nodes = ProductRagNodes(llm=mock_llm, vector_store=vector_store, top_k=5)
+        catalog_filter = ProductCatalogFilter(
+            marca="Yanbal",
+            edicion="C10",
+        )
 
-        state = {
-            "raw_query": "labial",
-            "refined_query": "labial",
-            "metadata_filters": {
-                "marca": "Yanbal",
-                "edicion": "C10",
-            },
-            "iteration_count": 0,
-        }
-
-        result = await nodes.retrieve_products(state)
-        docs = result["retrieved_products"]
+        docs = await vector_store.ahybrid_search(
+            query="labial",
+            k=5,
+            filters=catalog_filter,
+        )
         assert len(docs) > 0, "Se esperaba encontrar productos de Yanbal C10"
         for doc in docs:
             assert doc.metadata.get("marca") == "Yanbal"
@@ -142,22 +122,16 @@ async def test_retrieve_products_esika_brand_variations_real_db(db_conninfo, emb
             embedding_column="embedding_1024",
         )
 
-        mock_llm = MagicMock(spec=BaseChatModel)
-        nodes = ProductRagNodes(llm=mock_llm, vector_store=vector_store, top_k=5)
-
         for variant in ["Ésika", "esika", "essika"]:
-            state = {
-                "raw_query": "labiales mate",
-                "refined_query": "labiales mate",
-                "metadata_filters": {
-                    "marca": variant,
-                },
-                "user_id": 5,
-                "iteration_count": 0,
-            }
-
-            result = await nodes.retrieve_products(state)
-            docs = result["retrieved_products"]
+            catalog_filter = ProductCatalogFilter(
+                marca=variant,
+                user_id=5,
+            )
+            docs = await vector_store.ahybrid_search(
+                query="labiales mate",
+                k=5,
+                filters=catalog_filter,
+            )
             assert len(docs) > 0, f"Se esperaba encontrar labiales de Ésika usando variante: '{variant}'"
             for doc in docs:
                 assert doc.metadata.get("marca") == "Ésika"

@@ -17,9 +17,7 @@ from src.agent_service.graph.base_synthesizer import BaseSynthesizerNode
 from src.agent_service.soul import SoulRole
 from src.agent_service.graph.sub_graphs.sales_manage.nodes import SalesManageNodes
 from src.agent_service.graph.sub_graphs.product_resolver.nodes import ProductResolverNodes
-from src.agent_service.graph.sub_graphs.product_recomender.nodes import ProductRecomenderNodes
 from src.agent_service.graph.sub_graphs.contact_manage.nodes import ContactManageNodes
-from src.agent_service.graph.sub_graphs.product_rag.nodes import ProductRagNodes
 from src.agent_service.graph.sub_graphs.product_advisor.nodes import ProductAdvisorNodes
 
 
@@ -139,9 +137,7 @@ def test_format_final_response():
 def test_all_subgraph_nodes_inherit_from_base_synthesizer():
     assert issubclass(SalesManageNodes, BaseSynthesizerNode)
     assert issubclass(ProductResolverNodes, BaseSynthesizerNode)
-    assert issubclass(ProductRecomenderNodes, BaseSynthesizerNode)
     assert issubclass(ContactManageNodes, BaseSynthesizerNode)
-    assert issubclass(ProductRagNodes, BaseSynthesizerNode)
     assert issubclass(ProductAdvisorNodes, BaseSynthesizerNode)
 
 
@@ -247,9 +243,9 @@ async def test_product_resolver_synthesize_currency_formatting():
 
 
 @pytest.mark.asyncio
-async def test_product_recomender_synthesize_currency_formatting():
+async def test_product_advisor_synthesize_currency_formatting():
     mock_llm = MagicMock()
-    nodes = ProductRecomenderNodes(llm=mock_llm)
+    nodes = ProductAdvisorNodes(llm=mock_llm)
     # Test currency formatting helper
     assert nodes.format_currency(29.9, "PEN") == "S/. 29.90"
     assert nodes.get_channel({"channel": "web"}) == "web"
