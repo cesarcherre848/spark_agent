@@ -7,7 +7,8 @@ from typing import Optional
 from dataclasses import dataclass
 from dotenv import load_dotenv
 
-load_dotenv(".env.dev")
+load_dotenv(".env.dev", override=True)
+load_dotenv(".env.qa", override=True)
 
 
 @dataclass
