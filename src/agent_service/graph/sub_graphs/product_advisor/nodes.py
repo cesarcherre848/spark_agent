@@ -82,10 +82,32 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
         customer_name = state.get("customer_name")
         user_id = state.get("user_id")
 
+        # Obtener historial de diálogo previo para soporte multi-turno
+        all_messages = state.get("messages", [])
+        history_pool = (
+            all_messages[:-1]
+            if (all_messages and isinstance(all_messages[-1], HumanMessage) and all_messages[-1].content == raw_query)
+            else all_messages
+        )
+        trimmed_history = trim_messages(
+            history_pool,
+            max_tokens=6,
+            strategy="last",
+            token_counter=len,
+        )
+
         system_prompt = f"""
             Eres el planificador experto de un Asesor de Productos y Catálogo Comercial.
             Tu misión es analizar la consulta del usuario y generar un plan estructurado (AdvisorPlan)
             con las herramientas necesarias para responder de forma precisa, veraz y personalizada.
+
+            RESOLUCIÓN CONTEXTUAL Y MULTI-TURNO:
+            - Si la consulta actual es una pregunta de seguimiento, aclaración, comparación o filtro de un diálogo anterior
+              (ej: 'de essika o de yambal ?', '¿cuánto cuesta el segundo?', '¿tienes en color rojo?'),
+              analízala OBLIGATORIAMENTE en conjunto con los turnos previos de la conversación.
+            - Propaga la categoría, tipo de producto o producto base discutido (ej: si antes hablaron de
+              'perfumes para mujer', y ahora dice 'de essika o de yambal ?', la búsqueda debe ser de 'perfumes' o 'fragancias'
+              para cada marca indicada, NUNCA la frase genérica 'productos destacados').
 
             HERRAMIENTAS DISPONIBLES:
             1. 'search_product_catalog': Búsqueda semántica híbrida en el catálogo. Argumentos:
@@ -144,6 +166,7 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
 
         messages = [
             SystemMessage(content=system_prompt),
+            *trimmed_history,
             HumanMessage(content=user_content),
         ]
 
@@ -155,9 +178,15 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
         except Exception as e:
             logger.warning(f"Error generando plan estructurado con LLM: {e}. Aplicando plan por defecto.")
             plan_rationale = "Plan de contingencia: búsqueda directa en catálogo."
+            fallback_query = raw_query
+            if len(raw_query.split()) <= 6 and trimmed_history:
+                for m in reversed(trimmed_history):
+                    if isinstance(m, HumanMessage) and m.content:
+                        fallback_query = f"{m.content} {raw_query}"
+                        break
             planned_tools = [{
                 "tool_name": "search_product_catalog",
-                "arguments": {"query": raw_query, "limit": 8, "user_id": user_id or 5},
+                "arguments": {"query": fallback_query, "limit": 8, "user_id": user_id or 5},
                 "purpose": "Búsqueda estándar de catálogo.",
             }]
             extracted_meta = {}
@@ -292,6 +321,20 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
 
         products_context = format_products_for_advisor_prompt(candidate_products)
 
+        # Historial de diálogo previo para respuesta natural continua
+        all_messages = state.get("messages", [])
+        history_pool = (
+            all_messages[:-1]
+            if (all_messages and isinstance(all_messages[-1], HumanMessage) and all_messages[-1].content == raw_query)
+            else all_messages
+        )
+        trimmed_history = trim_messages(
+            history_pool,
+            max_tokens=6,
+            strategy="last",
+            token_counter=len,
+        )
+
         history_context = ""
         if purchase_history and purchase_history.get("top_purchased_products"):
             history_context = f"""
@@ -315,6 +358,8 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
                - Si los productos recomendados provienen de distintos proveedores o marcas comerciales (consulta abierta o comparativa), indica claramente la marca o casa comercial de cada opción (ej: [Ésika], [Yanbal], [Cyzone]) para que el cliente distinga y compare fácilmente.
                - Si todos los productos pertenecen a la misma marca/proveedor ya solicitada por el usuario (consulta mono-marca), menciónala con naturalidad en el saludo o introducción y NO satures repitiéndola en cada viñeta.
                - 100% Whitelabel: NUNCA expongas identificadores internos, bases de datos ni términos de backend (como 'vendor_id', 'res_partner', 'partner_id', 'Odoo', 'PostgreSQL', 'view_user_authorized_products'). Utiliza siempre el nombre de la marca comercial de cara al cliente.
+            6. COHERENCIA CONVERSACIONAL:
+               - Mantén la continuidad natural con las respuestas y preguntas anteriores del diálogo sin reiniciar la conversación como si fueras un extraño.
 
             {channel_instructions}
         """
@@ -330,6 +375,7 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
 
         messages = [
             SystemMessage(content=system_prompt),
+            *trimmed_history,
             HumanMessage(content=user_content),
         ]
 
@@ -366,12 +412,26 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
 
         products_context = format_products_for_advisor_prompt(candidate_products)
 
+        # Extraer historial previo para evaluación justa de continuidad
+        all_messages = state.get("messages", [])
+        history_pool = (
+            all_messages[:-1]
+            if (all_messages and isinstance(all_messages[-1], HumanMessage) and all_messages[-1].content == raw_query)
+            else all_messages
+        )
+        trimmed_history = trim_messages(
+            history_pool,
+            max_tokens=6,
+            strategy="last",
+            token_counter=len,
+        )
+
         system_prompt = """
             Eres un Juez Auditor de Calidad para un agente comercial de catálogo.
             Tu misión es evaluar objetiva y rigurosamente la respuesta generada según una RÚBRICA DE CALIDAD:
 
             CRITERIOS (Calificación de 1.0 a 10.0):
-            1. relevance_score: ¿La respuesta atiende de forma directa, útil y completa la necesidad del usuario?
+            1. relevance_score: ¿La respuesta atiende de forma directa, útil y completa la necesidad del usuario considerando el contexto del diálogo?
             2. grounding_score: ¿Los productos, precios y SKUs mencionados provienen estrictamente de los PRODUCTOS DISPONIBLES sin ninguna alucinación?
             3. constraints_score: ¿Se respetaron los filtros requeridos (marcas solicitadas, números de página, campañas, límites de presupuesto)?
             4. presentation_score: ¿El tono es consultivo, claro, atractivo y adecuado para un chat comercial?
@@ -396,6 +456,7 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
 
         messages = [
             SystemMessage(content=system_prompt),
+            *trimmed_history,
             HumanMessage(content=user_content),
         ]
 

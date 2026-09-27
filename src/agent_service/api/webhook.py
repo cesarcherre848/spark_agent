@@ -39,7 +39,14 @@ def get_agent_graph() -> Any:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Gestor de ciclo de vida asíncrono de la aplicación FastAPI."""
-    logger.info("Iniciando Spark Agent Webhook API...")
+    # Configurar tablas de checkpointer de PostgreSQL
+    try:
+        from src.agent_service.graph.sub_graphs.user_memory.checkpointer import get_postgres_checkpointer
+        await get_postgres_checkpointer()
+        logger.info("Checkpointer PostgreSQL (AsyncPostgresSaver) verificado exitosamente.")
+    except Exception as e:
+        logger.warning(f"No fue posible inicializar checkpointer PostgreSQL en lifespan: {e}")
+
     # Precargar el grafo principal al inicio
     try:
         get_agent_graph()

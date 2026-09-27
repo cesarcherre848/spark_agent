@@ -216,6 +216,31 @@ def create_input_guardrail_node():
             }
 
         if eval_result.is_warning:
+            # Context-aware smoothing: si es una pregunta corta de seguimiento y hay mensajes previos en la conversación,
+            # o menciona marcas comerciales o atributos de catálogo, descartar la falsa alarma de out_of_scope.
+            has_history = len(state.get("messages", [])) > 1
+            words = [w.strip("?,.:;!¡¿") for w in raw_query.lower().split() if w.strip("?,.:;!¡¿")]
+            commercial_keywords = {
+                "esika", "essika", "ésika", "yanbal", "yambal", "unique", "cyzone", "lbel", "l'bel",
+                "precio", "cuanto", "cuánto", "marca", "catalogo", "catálogo", "opcion", "opción",
+                "segundo", "primero", "tercero", "perfume", "labial", "crema", "rimel", "mascara"
+            }
+            has_commercial_kw = any(w in commercial_keywords for w in words)
+            if eval_result.category == ViolationCategory.OUT_OF_SCOPE and (has_history or has_commercial_kw) and len(words) <= 8:
+                logger.info(
+                    f"[Guardrail] Suavizando advertencia de out_of_scope para consulta de seguimiento: '{raw_query}'"
+                )
+                return {
+                    "is_blocked": False,
+                    "is_warning": False,
+                    "guardrail_action": GuardrailAction.ALLOW.value,
+                    "guardrail_category": ViolationCategory.NONE.value,
+                    "guardrail_reason": "Consulta de seguimiento contextual válida.",
+                    "guardrail_warning": None,
+                    "guardrail_scores": eval_result.scores,
+                    "raw_query": raw_query,
+                }
+
             logger.info(
                 f"[Capa 2 Guardrail] Advertencia comercial emitida. Categoría: {eval_result.category.value}. "
                 f"Acción: {eval_result.action.value}. Razón: {eval_result.reason}"
@@ -546,10 +571,21 @@ def build_main_graph(
     return workflow.compile(checkpointer=resolved_checkpointer)
 
 
-def get_main_graph():
-    """Fábrica sin argumentos para LangGraph Studio y punto de entrada oficial."""
+def get_main_graph(checkpointer: Optional[BaseCheckpointSaver] = None):
+    """Fábrica para LangGraph Studio, Webhook y punto de entrada oficial."""
     llm = get_default_llm()
     pool = get_db_pool()
     embeddings = get_embedding_service()
     store = UserMemoryStore(pool=pool, embedding_service=embeddings)
-    return build_main_graph(llm=llm, memory_store=store, checkpointer=MemorySaver())
+    cp = checkpointer
+    if cp is None:
+        try:
+            if pool and not getattr(pool, "closed", True):
+                from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
+                cp = AsyncPostgresSaver(pool)
+            else:
+                cp = MemorySaver()
+        except Exception as e:
+            logger.warning(f"No fue posible inicializar AsyncPostgresSaver ({e}), usando MemorySaver.")
+            cp = MemorySaver()
+    return build_main_graph(llm=llm, memory_store=store, checkpointer=cp)

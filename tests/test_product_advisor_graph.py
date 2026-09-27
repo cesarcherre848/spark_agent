@@ -14,6 +14,7 @@ Cubre:
 import pytest
 from unittest.mock import MagicMock, AsyncMock, patch
 from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.documents import Document
 
 from src.agent_service.graph.sub_graphs.product_advisor.schemas import (
@@ -528,4 +529,89 @@ async def test_advisor_multi_vendor_handling():
     assert "res_partner" not in draft_text.lower()
     assert "partner_id" not in draft_text.lower()
     assert "odoo" not in draft_text.lower()
+
+
+@pytest.mark.asyncio
+async def test_advisor_multi_turn_context_retention():
+    """Valida la retención de contexto en conversaciones multi-turno:
+    1. plan_and_select_tools inyecta los mensajes previos de la conversación al planificador.
+    2. synthesize_draft inyecta los mensajes previos al sintetizador.
+    3. rubric_evaluator_judge inyecta los mensajes previos al evaluador de calidad.
+    """
+    mock_llm = MagicMock(spec=BaseChatModel)
+    nodes = ProductAdvisorNodes(llm=mock_llm, default_max_iterations=3)
+
+    turn1_user = HumanMessage(content="Hola, busco perfumes florales para mujer")
+    turn1_ai = AIMessage(content="Tenemos opciones florales como Vibranza de Ésika y Ccori de Yanbal. ¿Cuál marca prefieres?")
+    turn2_user = HumanMessage(content="de essika o de yambal ?")
+
+    state: ProductAdvisorState = {
+        "raw_query": "de essika o de yambal ?",
+        "messages": [turn1_user, turn1_ai, turn2_user],
+        "iteration_count": 0,
+        "max_iterations": 3,
+        "candidate_products": [
+            {"sku": "E-01", "name": "Vibranza Ésika", "marca": "Ésika", "price": 150.0},
+            {"sku": "Y-02", "name": "Ccori Yanbal", "marca": "Yanbal", "price": 210.0},
+        ],
+    }
+
+    # 1. Verificar plan_and_select_tools
+    nodes._planner = AsyncMock()
+    nodes._planner.ainvoke.return_value = AdvisorPlan(
+        reasoning="El usuario responde a la pregunta de marca para la búsqueda previa de perfumes florales",
+        strategy="direct_search",
+        tool_calls=[
+            AdvisorToolCall(
+                tool_name="search_product_catalog",
+                arguments={"query": "perfumes florales mujer", "marca": "Ésika"},
+                purpose="Buscar perfumes florales Ésika",
+            ),
+            AdvisorToolCall(
+                tool_name="search_product_catalog",
+                arguments={"query": "perfumes florales mujer", "marca": "Yanbal"},
+                purpose="Buscar perfumes florales Yanbal",
+            ),
+        ],
+    )
+
+    plan_res = await nodes.plan_and_select_tools(state)
+    assert len(plan_res["planned_tools"]) == 2
+
+    # Verificar que _planner.ainvoke recibió turn1_user y turn1_ai en su lista de mensajes
+    call_args = nodes._planner.ainvoke.call_args[0][0]
+    message_contents = [getattr(m, "content", "") for m in call_args]
+    assert any("perfumes florales para mujer" in c for c in message_contents)
+    assert any("Vibranza de Ésika y Ccori de Yanbal" in c for c in message_contents)
+
+    # 2. Verificar synthesize_draft
+    nodes._synthesizer = AsyncMock()
+    nodes._synthesizer.ainvoke.return_value = FinalAnswer(
+        response_text="¡Excelente! Te muestro ambas opciones de perfumes florales: Vibranza [Ésika] a S/ 150 y Ccori [Yanbal] a S/ 210."
+    )
+
+    draft_res = await nodes.synthesize_draft(state)
+    assert "Vibranza" in draft_res["draft_response"]
+
+    synth_call_args = nodes._synthesizer.ainvoke.call_args[0][0]
+    synth_contents = [getattr(m, "content", "") for m in synth_call_args]
+    assert any("perfumes florales para mujer" in c for c in synth_contents)
+
+    # 3. Verificar rubric_evaluator_judge
+    nodes._rubric_judge = AsyncMock()
+    nodes._rubric_judge.ainvoke.return_value = QualityRubricEvaluation(
+        relevance_score=10.0,
+        grounding_score=10.0,
+        constraints_score=10.0,
+        presentation_score=10.0,
+        is_approved=True,
+    )
+
+    rubric_res = await nodes.rubric_evaluator_judge(state)
+    assert rubric_res["meets_rubric"] is True
+
+    judge_call_args = nodes._rubric_judge.ainvoke.call_args[0][0]
+    judge_contents = [getattr(m, "content", "") for m in judge_call_args]
+    assert any("perfumes florales para mujer" in c for c in judge_contents)
+
 

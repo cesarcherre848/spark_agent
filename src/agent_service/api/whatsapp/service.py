@@ -35,8 +35,8 @@ class WhatsAppService:
     def _get_graph_app(self) -> Any:
         """Obtiene de forma perezosa la instancia del grafo principal si no fue inyectada."""
         if self._graph_app is None:
-            from src.agent_service.graph.main_graph import get_main_graph
-            self._graph_app = get_main_graph()
+            from src.agent_service.api.webhook import get_agent_graph
+            self._graph_app = get_agent_graph()
         return self._graph_app
 
     @staticmethod
