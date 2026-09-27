@@ -234,9 +234,9 @@ async def test_whatsapp_service_handles_message_flow(mock_whatsapp_settings, moc
     # 4. Verificó despacho de respuesta a Meta Cloud API
     mock_whatsapp_client.send_text_message.assert_awaited_once_with(
         to="51999999999",
-        text="Hola, el precio del SKU 1 es S/ 35.00 con stock disponible.",
+        text="Hola, el precio del SKU 1 es S/. 35.00 con stock disponible.",
     )
-    assert response == "Hola, el precio del SKU 1 es S/ 35.00 con stock disponible."
+    assert response == "Hola, el precio del SKU 1 es S/. 35.00 con stock disponible."
 
 
 # ==============================================================================

@@ -60,7 +60,8 @@ class BaseSynthesizerNode:
             return (
                 "DIRECTRICES OBLIGATORIAS DE FORMATO PARA WHATSAPP:\n"
                 "- Estilo para móvil: conciso, estructurado con viñetas limpias con guiones o asteriscos.\n"
-                "- Usa formato nativo de WhatsApp con *negrita* y _cursiva_.\n"
+                "- Usa formato nativo de WhatsApp: *negrita* (un solo asterisco) y _cursiva_ (guion bajo). NUNCA uses doble asterisco (**negrita**) ya que no se visualiza bien en WhatsApp móvil.\n"
+                "- CADA PRODUCTO O ELEMENTO DE LISTA DEBE IR OBLIGATORIAMENTE EN UN RENGLÓN INDEPENDIENTE CON UN SALTO DE LÍNEA (\\n) AL INICIO. PROHIBIDO ESTRICTAMENTE COLOCAR VIÑETAS CONSECUTIVAS EN EL MISMO PÁRRAFO O RENGLÓN CORRIDO.\n"
                 "- PROHIBIDO estrictamente el uso de tablas Markdown (no se visualizan bien en pantallas móviles de WhatsApp). Usa listas con viñetas.\n"
                 "- PROHIBIDO usar etiquetas HTML.\n"
                 "- MONEDA: Expresa siempre los montos en moneda nacional como 'S/.' (ej: 'S/. 35.00'). NUNCA uses 'PEN', '$ (PEN)' ni 'S/' sin punto.\n"
@@ -156,15 +157,33 @@ class BaseSynthesizerNode:
         """
         channel_instructions = cls.get_channel_prompt_instructions(state)
 
-        standard_product_rules = """
+        ch = cls.get_channel(state)
+        bullet_example = (
+            "- *[SKU] Nombre Comercial* (S/. XX.XX): Breve beneficio o motivo de recomendación."
+            if ch == "whatsapp"
+            else "* **[SKU] Nombre Comercial** (S/. XX.XX): Breve beneficio o motivo de recomendación."
+        )
+        sku_format = (
+            "entre corchetes en negrita WhatsApp (ej: *[SKU]*)"
+            if ch == "whatsapp"
+            else "entre corchetes en negrita (ej: **[SKU]**)"
+        )
+        newline_rule = (
+            "- CADA VIÑETA DEBE IR EN UN RENGLÓN INDEPENDIENTE CON UN SALTO DE LÍNEA (\\n). PROHIBIDO escribir viñetas seguidas en la misma línea."
+            if ch == "whatsapp"
+            else ""
+        )
+
+        standard_product_rules = f"""
 ESTRUCTURA Y AGRUPACIÓN DE PRODUCTOS:
 - Si las opciones recomendadas provienen de DOS O MÁS marcas comerciales distintas (consulta abierta, comparativa o catálogo variado):
   AGRÚPALAS de forma limpia y ordenada por cada marca comercial utilizando un subtítulo destacado para cada una (ejemplo: '*En [Nombre de Marca]:*' o '**[Nombre de Marca]**:'), seguido de sus viñetas correspondientes.
 - Si todos los productos pertenecen a una ÚNICA marca comercial (consulta mono-marca o filtro específico):
   Menciona la marca en la introducción y presenta las viñetas directamente sin subtítulos repetitivos.
 - ESTRUCTURA DE CADA VIÑETA:
-  * **[SKU] Nombre Comercial** (S/. XX.XX): Breve beneficio o motivo de recomendación.
-- CÓDIGO SKU: Obligatorio si está disponible en los datos, siempre entre corchetes en negrita (ej: **[SKU]**).
+  {bullet_example}
+{newline_rule}
+- CÓDIGO SKU: Obligatorio si está disponible en los datos, siempre {sku_format}.
 - PRECIOS: Expresa siempre los montos en moneda nacional como 'S/.' (ej: 'S/. 35.00'). NUNCA inventes precios ni códigos SKU ausentes en los productos proporcionados.
 - Si el catálogo no cuenta con opciones exactas, sé cortés, transparente y ofrece la alternativa disponible más cercana.
 """.strip()
@@ -221,11 +240,14 @@ CONTINUIDAD CONVERSACIONAL (MULTI-TURNO):
 
     @staticmethod
     def _adapt_for_whatsapp(text: str) -> str:
-        """Adapta tablas Markdown accidentales y remueve tags HTML para WhatsApp."""
-        # Remover etiquetas HTML
+        """Adapta tablas Markdown accidentales, separa viñetas inline y estandariza formato para WhatsApp."""
+        if not text:
+            return ""
+
+        # 1. Remover etiquetas HTML
         cleaned = re.sub(r"<[^>]+>", "", text)
 
-        # Transformar tablas Markdown a listas de viñetas legibles
+        # 2. Transformar tablas Markdown a listas de viñetas legibles
         lines = cleaned.split("\n")
         new_lines = []
         table_headers = []
@@ -261,7 +283,35 @@ CONTINUIDAD CONVERSACIONAL (MULTI-TURNO):
 
             new_lines.append(line)
 
-        return "\n".join(new_lines)
+        cleaned = "\n".join(new_lines)
+
+        # 3. Separar subtítulos de marca como '*En Ésika:*' o '**En Ésika:**' si están precedidos por texto en la misma línea
+        cleaned = re.sub(r"(?<=[^\n])\s+(\*+En\s+[^:]+:\*+)", r"\n\n\1\n", cleaned)
+
+        # 4. Separar viñetas inline pegadas con espacio: ej. '... pág 60 - [SKU]' o '... : * [SKU]' o '... - **[SKU]'
+        cleaned = re.sub(r"(?<=[^\n])\s+([*-]\s+(?:\*+|\b\[))", r"\n\1", cleaned)
+
+        # 5. Separar notas complementarias o de transición (ej: 'Para complementar...', 'Como verás...')
+        cleaned = re.sub(
+            r"(?<=[.!?])\s+((?:Para complementar|También contamos con|Como puedes ver|Como verás)[^.]*?\.)",
+            r"\n\n\1",
+            cleaned,
+        )
+
+        # 6. Separar preguntas de cierre si están pegadas al final de un producto o nota
+        cleaned = re.sub(
+            r"(?<=[.!?])\s+(¿(?:Te gustaría|Deseas|Prefieres|Confirmamos|Quieres)[^?]+\?)",
+            r"\n\n\1",
+            cleaned,
+        )
+
+        # 7. Convertir **bold** de Markdown a *bold* de WhatsApp
+        cleaned = re.sub(r"\*\*([^*]+?)\*\*", r"*\1*", cleaned)
+
+        # 8. Normalizar saltos de línea (máximo 2 saltos consecutivos)
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+
+        return cleaned.strip()
 
     @classmethod
     def format_final_response(

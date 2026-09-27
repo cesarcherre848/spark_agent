@@ -30,13 +30,14 @@ class WhatsAppResponder:
 
     @staticmethod
     def format_response(text: str) -> str:
-        """Sanitiza y limpia el texto generado por el agente para WhatsApp, eliminando artefactos internos y términos de backend."""
+        """Sanitiza y limpia el texto generado por el agente para WhatsApp, delegando en BaseSynthesizerNode."""
+        from src.agent_service.graph.base_synthesizer import BaseSynthesizerNode
         clean = extract_clean_text(str(text or ""))
         if not clean:
             return ""
 
-        # Fail-safe / Whitelabel defense: Eliminar menciones a infraestructura y backend
-        return WhitelabelSanitizer.clean_text(clean)
+        # Fail-safe centralizado en BaseSynthesizerNode (divisas, whitelabel y formato WhatsApp)
+        return BaseSynthesizerNode.post_process_response(clean, channel="whatsapp")
 
     @staticmethod
     def chunk_message(text: str, max_length: int = MAX_WHATSAPP_MESSAGE_LENGTH) -> List[str]:

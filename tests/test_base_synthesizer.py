@@ -117,6 +117,39 @@ def test_base_synthesizer_table_adaptation_whatsapp():
     assert "S/. 35.00" in adapted
 
 
+def test_base_synthesizer_whatsapp_formatting_and_inline_bullet_separation():
+    node = BaseSynthesizerNode()
+    raw = (
+        "¡Excelente elección! Aquí tienes las opciones: *En Ésika:* "
+        "- **[01426] You Live** (S/. 107.00) - Pág. 60 "
+        "- **[08218] You Good Vibes** (S/. 107.00) - Pág. 60. "
+        "Para complementar tu rutina, también contamos con el **[392] Desodorante** (S/. 28.00). "
+        "¿Te gustaría que preparemos la cotización formal de alguno de estos productos? 💼"
+    )
+    processed = node.post_process_response(raw, channel="whatsapp")
+
+    # 1. Separación de subtítulo de marca
+    assert "*En Ésika:*" in processed
+    # 2. Separación de viñetas en líneas independientes
+    assert "\n- *[01426] You Live*" in processed
+    assert "\n- *[08218] You Good Vibes*" in processed
+    # 3. Conversión de doble asterisco a simple (WhatsApp bold)
+    assert "**" not in processed
+    assert "*[01426] You Live*" in processed
+    # 4. Separación de nota de transición y pregunta final
+    assert "\n\nPara complementar tu rutina" in processed
+    assert "\n\n¿Te gustaría que preparemos" in processed
+
+
+def test_base_synthesizer_web_preserves_markdown_bold():
+    node = BaseSynthesizerNode()
+    raw = "- **[01426] You Live** (35.00 PEN)"
+    processed = node.post_process_response(raw, channel="web")
+    # En canal web se debe preservar el doble asterisco para negrita Markdown
+    assert "**[01426] You Live**" in processed
+    assert "S/. 35.00" in processed
+
+
 def test_format_final_response():
     node = BaseSynthesizerNode()
     result = node.format_final_response(
@@ -153,7 +186,7 @@ def test_base_synthesizer_build_system_prompt_contract():
     assert "MIA" in prompt
     assert "ESTRUCTURA Y AGRUPACIÓN DE PRODUCTOS" in prompt
     # 2. Formato estándar de viñetas con [SKU] y S/.
-    assert "**[SKU] Nombre Comercial**" in prompt
+    assert "*[SKU] Nombre Comercial*" in prompt
     assert "S/." in prompt
     # 3. Directrices de canal para WhatsApp
     assert "DIRECTRICES OBLIGATORIAS DE FORMATO PARA WHATSAPP" in prompt

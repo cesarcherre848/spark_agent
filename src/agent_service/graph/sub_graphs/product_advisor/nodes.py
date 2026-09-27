@@ -76,9 +76,14 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
                     break
         raw_query = (raw_query or "").strip()
 
-        iteration_count = state.get("iteration_count", 0)
+        # Si no hay crítica previa activa, es un nuevo turno: reiniciar contador de iteración
         critique = state.get("critique")
-        remedy_suggestions = state.get("suggested_improvements") or []
+        if not critique:
+            iteration_count = 0
+            remedy_suggestions = []
+        else:
+            iteration_count = state.get("iteration_count", 0)
+            remedy_suggestions = state.get("suggested_improvements") or []
         partner_id = state.get("partner_id")
         customer_name = state.get("customer_name")
         user_id = state.get("user_id")
@@ -219,6 +224,9 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
             "plan_rationale": plan_rationale,
             "planned_tools": planned_tools,
             "metadata_filters": extracted_meta,
+            "iteration_count": iteration_count,
+            "critique": critique,
+            "suggested_improvements": remedy_suggestions,
         }
 
     async def execute_tools(self, state: ProductAdvisorState) -> Dict[str, Any]:
@@ -509,7 +517,7 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
             1. relevance_score: ¿La respuesta atiende de forma directa, útil y completa la necesidad del usuario considerando el contexto del diálogo?
             2. grounding_score: ¿Los productos, precios y SKUs mencionados provienen estrictamente de los PRODUCTOS DISPONIBLES sin ninguna alucinación?
             3. constraints_score: ¿Se respetaron los filtros y restricciones del diálogo (público objetivo / género hombre/mujer/niños, marcas solicitadas sin mezclar marcas no deseadas, números de página, campañas, límites de presupuesto)? Si el diálogo solicita productos masculinos/hombre y se recomiendan artículos femeninos o infantiles, califica constraints_score con < 5.0 y desaprueba (is_approved = False) con crítica explícita. Si el usuario fijó un presupuesto ajustado y el catálogo solo tiene opciones de precio ligeramente mayor, califica POSITIVAMENTE (>= 8.0) si el asesor explicó con cortesía el rango de precios disponible y presentó las opciones más cercanas en lugar de dejar al cliente sin respuesta.
-            4. presentation_score: ¿Cumple con el estándar del sintetizador padre (agrupación limpia por marcas cuando hay 2 o más marcas distintas, formato de viñetas con **[SKU] Nombre**, precio en S/., tono consultivo sin jerga técnica y sin saludos redundantes si hay turnos previos)?
+            4. presentation_score: ¿Cumple con el estándar del sintetizador padre (agrupación limpia por marcas cuando hay 2 o más marcas distintas, formato de viñetas con [SKU] Nombre, precio en S/., tono consultivo sin jerga técnica y sin saludos redundantes si hay turnos previos)? OBLIGATORIO: Si el texto contiene viñetas de productos pegadas o concatenadas en el mismo párrafo sin saltos de línea (\n), califica presentation_score < 6.0, marca is_approved = False y exige en remedy_suggestions: 'Separar cada producto en un renglón independiente con salto de línea (\n)'.
 
             REGLA DE APROBACIÓN (is_approved):
             - Para ser True: CADA uno de los 4 puntajes debe ser >= 7.0 Y el promedio general debe ser >= 8.0.
@@ -575,5 +583,10 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
         return BaseSynthesizerNode.format_final_response(
             draft_response,
             state,
-            extra={"is_sufficient": meets_rubric},
+            extra={
+                "is_sufficient": meets_rubric,
+                "iteration_count": 0,
+                "critique": None,
+                "suggested_improvements": [],
+            },
         )

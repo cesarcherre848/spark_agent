@@ -333,6 +333,7 @@ def create_router_node(llm: BaseChatModel):
             "raw_query": raw_query,
             "final_response": None,
             "cancellation_reason": None,
+            "iteration_count": 0,
         }
 
         # Si el Router clasifica como out_of_scope, preparar bloqueo o permitir advertencia si ya venía marcada
