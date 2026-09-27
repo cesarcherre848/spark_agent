@@ -155,17 +155,21 @@ def test_base_synthesizer_build_system_prompt_contract():
 
     # 1. Identidad de MIA y SOUL
     assert "MIA" in prompt
-    assert "ESTÁNDAR OBLIGATORIO DE PRESENTACIÓN DE PRODUCTOS" in prompt
+    assert "ESTRUCTURA Y AGRUPACIÓN DE PRODUCTOS" in prompt
     # 2. Formato estándar de viñetas con [SKU] y S/.
     assert "**[SKU] Nombre Comercial**" in prompt
     assert "S/." in prompt
     # 3. Directrices de canal para WhatsApp
     assert "DIRECTRICES OBLIGATORIAS DE FORMATO PARA WHATSAPP" in prompt
-    # 4. Continuidad multi-turno
+    # 4. Agrupación por marca cuando hay 2 o más marcas
+    assert "AGRÚPALAS de forma limpia y ordenada por cada marca comercial" in prompt
+    # 5. Continuidad multi-turno
     assert "NO repitas saludos de bienvenida" in prompt
-    # 5. Whitelabel y multi-marca
+    # 6. Whitelabel y neutralidad comercial sin sesgo de marcas hardcodeadas
     assert "100% Whitelabel" in prompt
-    assert "[Ésika]" in prompt or "[Yanbal]" in prompt
+    assert "NEUTRALIDAD COMERCIAL" in prompt
+    assert "Ésika" not in prompt
+    assert "Yanbal" not in prompt
 
 
 def test_base_synthesizer_format_products_context():

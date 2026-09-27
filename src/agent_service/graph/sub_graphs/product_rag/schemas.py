@@ -10,7 +10,7 @@ class ProductCandidate(BaseModel):
     description: str = Field(description="Descripción y detalles técnicos del producto.")
     pagina: Optional[int] = Field(default=None, description="Número de página del catálogo.")
     edicion: Optional[str] = Field(default=None, description="Edición o campaña del catálogo (ej: 'C10').")
-    marca: Optional[str] = Field(default=None, description="Marca comercial del producto (ej: 'Yanbal').")
+    marca: Optional[str] = Field(default=None, description="Marca comercial del producto.")
 
     def to_prompt_item(self) -> str:
         sku_str = f" [SKU: {self.sku}]" if self.sku else ""
@@ -58,7 +58,7 @@ class NormalizedQuery(BaseModel):
     )
     marca: Optional[str] = Field(
         default=None,
-        description="Marca específica del producto si el usuario la menciona explícitamente (ej: 'Yanbal', 'Ésika', 'Belcorp').",
+        description="Marca comercial específica si el usuario la menciona explícitamente.",
     )
 
 

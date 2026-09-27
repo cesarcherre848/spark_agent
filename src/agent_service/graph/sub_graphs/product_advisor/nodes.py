@@ -104,17 +104,17 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
 
             RESOLUCIÓN CONTEXTUAL Y MULTI-TURNO:
             - Si la consulta actual es una pregunta de seguimiento, aclaración, comparación o filtro de un diálogo anterior
-              (ej: 'de essika o de yambal ?', '¿cuánto cuesta el segundo?', '¿tienes en color rojo?'),
+              (ej: 'de [Marca A] o de [Marca B] ?', '¿cuánto cuesta el segundo?', '¿tienes en color rojo?'),
               analízala OBLIGATORIAMENTE en conjunto con los turnos previos de la conversación.
             - Propaga la categoría, tipo de producto o producto base discutido (ej: si antes hablaron de
-              'perfumes para mujer', y ahora dice 'de essika o de yambal ?', la búsqueda debe ser de 'perfumes' o 'fragancias'
+              'perfumes para mujer', y ahora dice 'de [Marca A] o de [Marca B] ?', la búsqueda debe ser de 'perfumes' o 'fragancias'
               para cada marca indicada, NUNCA la frase genérica 'productos destacados').
 
             HERRAMIENTAS DISPONIBLES:
             1. 'search_product_catalog': Búsqueda semántica híbrida en el catálogo. Argumentos:
                - query (str): Términos clave del producto.
-               - marca (str, opcional): Marca canónica (ej: 'Yanbal', 'Ésika').
-               - vendor_name (str, opcional): Nombre del proveedor o casa matriz (ej: 'Unique S.A.', 'CETCO S.A.').
+               - marca (str, opcional): Marca comercial canónica consultada. Si el usuario solicita explícitamente una marca, pásala SIEMPRE aquí para filtrar únicamente sus productos.
+               - vendor_name (str, opcional): Nombre comercial del proveedor o partner si se especifica.
                - pagina (int, opcional): Número de página exacta en el catálogo.
                - edicion (str, opcional): Edición/campaña (ej: 'C10').
                - limit (int, opcional): Cantidad máxima a recuperar (default 8).
@@ -138,8 +138,10 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
             PAUTAS DE PLANEAMIENTO:
             - Si el usuario pide recomendaciones personalizadas ("según lo que suelo comprar", "¿qué me sugieres?"),
               invoca 'get_customer_purchase_history' para conocer sus preferencias antes de buscar en el catálogo.
-            - Si el usuario pide un producto puntual o menciona marcas, páginas o campañas ("labial Yanbal pág 124"),
-              invoca 'search_product_catalog' extrayendo los metadatos correspondientes.
+            - Si el usuario pide un producto puntual o menciona marcas, páginas o campañas ("labial de [Marca] pág 12"),
+              invoca 'search_product_catalog' extrayendo los metadatos correspondientes (restringiendo a dicha marca si fue solicitada).
+            - Si el usuario pide comparar marcas explícitamente ("compara [Marca A] y [Marca B]"), planea búsquedas específicas
+              para cada marca y consolida las opciones.
             - Si el usuario especifica un presupuesto máximo o pide "el más barato", planea 'search_product_catalog'
               seguido de 'filter_and_sort_products'.
             - Si el usuario busca productos complementarios a uno ya seleccionado, usa 'get_cross_sell_recommendations'.
@@ -348,8 +350,9 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
 
             DIRECTRICES ESPECÍFICAS DE CATÁLOGO:
             1. Solo menciona productos, SKUs, precios y campañas que aparezcan en los PRODUCTOS DISPONIBLES EN CATÁLOGO. NUNCA inventes precios ni códigos SKU.
-            2. Presenta de 1 a 4 opciones principales de manera clara y estructurada.
-            3. Invita con sutileza consultiva al cliente a cotizar o pedir alguno de los productos recomendados.
+            2. Presenta de 1 a 4 opciones principales de manera clara y estructurada. Si provienen de 2 o más marcas comerciales distintas, agrúpalas ordenadamente por marca (*En [Marca]:*).
+            3. Si el usuario solicitó una marca específica, restringe las opciones estrictamente a dicha marca sin mezclar otras marcas no deseadas.
+            4. Invita con sutileza consultiva al cliente a cotizar o pedir alguno de los productos recomendados.
         """
 
         system_prompt = self.build_synthesizer_system_prompt(
@@ -427,8 +430,8 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
             CRITERIOS (Calificación de 1.0 a 10.0):
             1. relevance_score: ¿La respuesta atiende de forma directa, útil y completa la necesidad del usuario considerando el contexto del diálogo?
             2. grounding_score: ¿Los productos, precios y SKUs mencionados provienen estrictamente de los PRODUCTOS DISPONIBLES sin ninguna alucinación?
-            3. constraints_score: ¿Se respetaron los filtros requeridos (marcas solicitadas, números de página, campañas, límites de presupuesto)?
-            4. presentation_score: ¿Cumple con el estándar del sintetizador padre (formato de viñetas con **[SKU] Nombre**, precio en S/., tono consultivo sin jerga técnica y sin saludos redundantes si hay turnos previos)?
+            3. constraints_score: ¿Se respetaron los filtros requeridos (marcas solicitadas sin mezclar marcas no deseadas, números de página, campañas, límites de presupuesto)?
+            4. presentation_score: ¿Cumple con el estándar del sintetizador padre (agrupación limpia por marcas cuando hay 2 o más marcas distintas, formato de viñetas con **[SKU] Nombre**, precio en S/., tono consultivo sin jerga técnica y sin saludos redundantes si hay turnos previos)?
 
             REGLA DE APROBACIÓN (is_approved):
             - Para ser True: CADA uno de los 4 puntajes debe ser >= 7.0 Y el promedio general debe ser >= 8.0.

@@ -54,8 +54,7 @@ class ProductRagNodes(BaseSynthesizerNode):
             Campos de salida:
                 1. 'search_query': Consulta normalizada, concisa y rica en palabras clave para búsqueda.
                 2. 'pagina': Número de página si el usuario la menciona explícitamente (ej. 'pág 12', 'página 124' -> 124).
-                3. 'edicion': Campaña o edición si se menciona (ej. 'C10', 'C-15' -> 'C10').
-                4. 'marca': Marca comercial si se menciona. Normaliza errores ortográficos o variantes coloquiales a la marca canónica oficial del catálogo (ej. 'essika', 'esika' -> 'Ésika'; 'yanbal' -> 'Yanbal').
+                4. 'marca': Marca comercial si se menciona. Normaliza errores ortográficos o variantes coloquiales a la marca canónica oficial correspondiente del catálogo.
         """
 
         user_prompt = f"""

@@ -70,7 +70,7 @@ class RecommendationIntentExtraction(BaseModel):
     )
     marca: Optional[str] = Field(
         default=None,
-        description="Marca comercial específica requerida (ej: 'Yanbal', 'Ésika', 'Belcorp').",
+        description="Marca comercial específica requerida si el usuario la indicó.",
     )
     search_query: str = Field(
         default="productos recomendados",

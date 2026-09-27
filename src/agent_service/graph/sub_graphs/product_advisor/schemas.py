@@ -43,7 +43,7 @@ class AdvisorPlan(BaseModel):
     )
     extracted_metadata: Optional[Dict[str, Any]] = Field(
         default=None,
-        description="Metadatos detectados en la consulta (ej: {'marca': 'Ésika', 'pagina': 12, 'edicion': 'C10'}).",
+        description="Metadatos comerciales detectados en la consulta (ej: {'marca': 'NombreMarca', 'pagina': 12, 'edicion': 'C10'}).",
     )
 
 

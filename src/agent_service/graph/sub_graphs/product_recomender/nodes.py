@@ -106,8 +106,7 @@ class ProductRecomenderNodes(BaseSynthesizerNode):
                - 'price_desc': si pide 'más caros', 'premium', 'alta gama', 'mayor precio'.
                - 'relevance': orden por defecto si no se piden superlativos de precio.
             9. 'pagina': Número de página si el usuario la indicó explícitamente (ej: 'pág 12', 'página 124' -> 124).
-            10. 'edicion': Campaña o edición del catálogo si se indicó explícitamente (ej: 'C10', 'C-15' -> 'C10').
-            11. 'marca': Marca comercial específica solicitada. Normaliza errores ortográficos o variantes informales a la marca oficial del catálogo (ej: 'essika', 'esika' -> 'Ésika'; 'yanbal' -> 'Yanbal').
+            11. 'marca': Marca comercial específica solicitada. Normaliza errores ortográficos o variantes informales a la marca oficial correspondiente del catálogo.
         """
 
         messages = [

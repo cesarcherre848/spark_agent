@@ -157,10 +157,14 @@ class BaseSynthesizerNode:
         channel_instructions = cls.get_channel_prompt_instructions(state)
 
         standard_product_rules = """
-ESTÁNDAR OBLIGATORIO DE PRESENTACIÓN DE PRODUCTOS:
-- Presenta de 1 a 4 opciones principales de manera clara y ordenada con viñetas limpias siguiendo esta estructura exacta:
-  * **[SKU] Nombre Comercial** (S/. XX.XX) - [Marca]: Breve beneficio o motivo de recomendación.
-- CÓDIGO SKU: Obligatorio si está disponible en los datos, siempre entre corchetes en negrita (ej: **[6189]**).
+ESTRUCTURA Y AGRUPACIÓN DE PRODUCTOS:
+- Si las opciones recomendadas provienen de DOS O MÁS marcas comerciales distintas (consulta abierta, comparativa o catálogo variado):
+  AGRÚPALAS de forma limpia y ordenada por cada marca comercial utilizando un subtítulo destacado para cada una (ejemplo: '*En [Nombre de Marca]:*' o '**[Nombre de Marca]**:'), seguido de sus viñetas correspondientes.
+- Si todos los productos pertenecen a una ÚNICA marca comercial (consulta mono-marca o filtro específico):
+  Menciona la marca en la introducción y presenta las viñetas directamente sin subtítulos repetitivos.
+- ESTRUCTURA DE CADA VIÑETA:
+  * **[SKU] Nombre Comercial** (S/. XX.XX): Breve beneficio o motivo de recomendación.
+- CÓDIGO SKU: Obligatorio si está disponible en los datos, siempre entre corchetes en negrita (ej: **[SKU]**).
 - PRECIOS: Expresa siempre los montos en moneda nacional como 'S/.' (ej: 'S/. 35.00'). NUNCA inventes precios ni códigos SKU ausentes en los productos proporcionados.
 - Si el catálogo no cuenta con opciones exactas, sé cortés, transparente y ofrece la alternativa disponible más cercana.
 """.strip()
@@ -168,10 +172,10 @@ ESTÁNDAR OBLIGATORIO DE PRESENTACIÓN DE PRODUCTOS:
         multi_vendor_rules = ""
         if include_multi_vendor:
             multi_vendor_rules = """
-GESTIÓN MULTI-PROVEEDOR / MULTI-MARCA Y WHITELABEL:
-- Si los productos recomendados provienen de distintas marcas comerciales (consulta abierta o comparativa), indica claramente la marca o casa comercial de cada opción (ej: [Ésika], [Yanbal], [Cyzone]) para que el cliente distinga y compare fácilmente.
-- Si todos los productos pertenecen a la misma marca ya solicitada por el usuario (consulta mono-marca), menciónala con naturalidad en el saludo o introducción y NO satures repitiéndola en cada viñeta.
-- 100% Whitelabel: NUNCA expongas identificadores internos, bases de datos ni términos de backend ('vendor_id', 'res_partner', 'partner_id', 'Odoo', 'PostgreSQL', 'view_user_authorized_products'). Utiliza siempre el nombre de la marca comercial de cara al cliente.
+GESTIÓN MULTI-MARCA Y WHITELABEL (PROMPT GENERAL):
+- NEUTRALIDAD COMERCIAL: Trata a todas las marcas comerciales del catálogo de manera equitativa, neutral y objetiva sin favorecer ni sesgar hacia ninguna marca en particular.
+- RESTRICCIÓN DE MARCA SOLICITADA: Si el usuario solicita explícitamente una marca específica, restringe las recomendaciones estrictamente a esa marca y NO mezcles opciones de otras marcas no solicitadas.
+- 100% Whitelabel: NUNCA expongas identificadores internos, bases de datos ni términos de backend ('vendor_id', 'res_partner', 'partner_id', 'Odoo', 'PostgreSQL', 'view_user_authorized_products'). Utiliza siempre el nombre comercial visible de cara al cliente.
 """.strip()
 
         conversational_rules = """
