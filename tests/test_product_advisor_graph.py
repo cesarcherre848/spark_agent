@@ -615,3 +615,115 @@ async def test_advisor_multi_turn_context_retention():
     assert any("perfumes florales para mujer" in c for c in judge_contents)
 
 
+@pytest.mark.asyncio
+async def test_multi_turn_gender_context_propagation():
+    """Verifica que el diálogo multi-turno preserve y propague el género/público objetivo (masculino/hombre)."""
+    mock_llm = MagicMock(spec=BaseChatModel)
+    nodes = ProductAdvisorNodes(llm=mock_llm)
+
+    turn1_user = HumanMessage(content="perfumes masculinos con precio menor de 50 soles")
+    turn1_ai = AIMessage(content="Actualmente, no contamos con perfumes masculinos por debajo de los S/. 50.00.")
+    turn2_user = HumanMessage(content="y colonias ?")
+
+    state: ProductAdvisorState = {
+        "raw_query": "y colonias ?",
+        "messages": [turn1_user, turn1_ai, turn2_user],
+        "iteration_count": 0,
+        "max_iterations": 3,
+        "candidate_products": [
+            {"sku": "208", "name": "Temptation Hombre Eau de Parfum", "marca": "Yanbal", "price": 192.0},
+            {"sku": "15225", "name": "Freshing Colonia corporal", "marca": "Ésika", "price": 46.90},
+        ],
+    }
+
+    # 1. Verificar plan_and_select_tools recibe historial y prompt de género
+    nodes._planner = AsyncMock()
+    nodes._planner.ainvoke.return_value = AdvisorPlan(
+        reasoning="El usuario pregunta por colonias en seguimiento a su búsqueda de fragancias masculinas",
+        strategy="direct_search",
+        tool_calls=[
+            AdvisorToolCall(
+                tool_name="search_product_catalog",
+                arguments={"query": "colonia hombre masculino eau de toilette fragancia fresca"},
+                purpose="Buscar colonias y fragancias frescas para hombre",
+            )
+        ],
+    )
+
+    plan_res = await nodes.plan_and_select_tools(state)
+    assert len(plan_res["planned_tools"]) == 1
+    assert "hombre" in plan_res["planned_tools"][0]["arguments"]["query"]
+
+    # Verificar que el prompt del sistema enviado al planner contiene la directriz de género
+    planner_calls = nodes._planner.ainvoke.call_args[0][0]
+    system_prompt_content = planner_calls[0].content
+    assert "PROPAGACIÓN OBLIGATORIA DE PÚBLICO OBJETIVO Y GÉNERO" in system_prompt_content
+
+    # 2. Verificar synthesize_draft contiene la salvaguarda de género
+    nodes._synthesizer = AsyncMock()
+    nodes._synthesizer.ainvoke.return_value = FinalAnswer(
+        response_text="En colonias masculinas y unisex contamos con: *En Ésika:* [15225] Freshing Colonia corporal (S/. 46.90)."
+    )
+
+    draft_res = await nodes.synthesize_draft(state)
+    synth_calls = nodes._synthesizer.ainvoke.call_args[0][0]
+    synth_sys_prompt = synth_calls[0].content
+    assert "CONSISTENCIA DE PÚBLICO OBJETIVO Y GÉNERO" in synth_sys_prompt
+    assert "15225" in draft_res["draft_response"]
+
+    # 3. Verificar rubric_evaluator_judge contiene la auditoría de género
+    nodes._rubric_judge = AsyncMock()
+    nodes._rubric_judge.ainvoke.return_value = QualityRubricEvaluation(
+        relevance_score=9.5,
+        grounding_score=9.5,
+        constraints_score=9.0,
+        presentation_score=9.5,
+        is_approved=True,
+    )
+
+    rubric_res = await nodes.rubric_evaluator_judge(state)
+    judge_calls = nodes._rubric_judge.ainvoke.call_args[0][0]
+    judge_sys_prompt = judge_calls[0].content
+    assert "público objetivo / género hombre/mujer/niños" in judge_sys_prompt
+    assert rubric_res["meets_rubric"] is True
+
+
+@pytest.mark.asyncio
+async def test_rubric_rejects_gender_mismatch():
+    """Verifica que el Juez de Rúbrica rechace una respuesta cuando se recomiendan artículos femeninos a una consulta masculina."""
+    mock_llm = MagicMock(spec=BaseChatModel)
+    nodes = ProductAdvisorNodes(llm=mock_llm)
+
+    turn1_user = HumanMessage(content="perfumes masculinos")
+    turn1_ai = AIMessage(content="Tenemos opciones como Ohm y Solo.")
+    turn2_user = HumanMessage(content="y colonias ?")
+
+    state: ProductAdvisorState = {
+        "raw_query": "y colonias ?",
+        "draft_response": "*En Yanbal:* [2210] Soy Única Colonia (S/. 68.00): Para resaltar tu feminidad.",
+        "candidate_products": [{"sku": "2210", "name": "Soy Única Colonia", "marca": "Yanbal", "price": 68.0}],
+        "messages": [turn1_user, turn1_ai, turn2_user],
+        "iteration_count": 0,
+        "max_iterations": 3,
+    }
+
+    # El LLM de evaluación detecta que Soy Única es femenina mientras se solicitó masculino
+    nodes._rubric_judge = AsyncMock()
+    nodes._rubric_judge.ainvoke.return_value = QualityRubricEvaluation(
+        relevance_score=5.0,
+        grounding_score=9.0,
+        constraints_score=4.0,
+        presentation_score=8.0,
+        is_approved=False,
+        critique="La respuesta recomienda una colonia femenina ('Soy Única') cuando el usuario busca opciones masculinas.",
+        remedy_suggestions=["Buscar fragancias masculinas ligeras como Selecto Eau de Toilette o colonias unisex."],
+    )
+
+    rubric_res = await nodes.rubric_evaluator_judge(state)
+    assert rubric_res["meets_rubric"] is False
+    assert rubric_res["rubric_scores"]["constraints"] == 4.0
+    assert "femenina" in rubric_res["critique"]
+    assert _route_after_rubric(rubric_res) == "plan_and_select_tools"
+
+
+

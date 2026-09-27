@@ -65,7 +65,7 @@ class QualityRubricEvaluation(BaseModel):
         ...,
         ge=1.0,
         le=10.0,
-        description="Puntaje de 1 a 10: ¿Se respetaron los filtros solicitados por el usuario (marca, página, edición, presupuesto)?",
+        description="Puntaje de 1 a 10: ¿Se respetaron los filtros solicitados por el usuario (marca, página, edición, presupuesto, público objetivo / género)?",
     )
     presentation_score: float = Field(
         ...,

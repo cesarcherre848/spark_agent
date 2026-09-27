@@ -104,11 +104,19 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
 
             RESOLUCIÓN CONTEXTUAL Y MULTI-TURNO:
             - Si la consulta actual es una pregunta de seguimiento, aclaración, comparación o filtro de un diálogo anterior
-              (ej: 'de [Marca A] o de [Marca B] ?', '¿cuánto cuesta el segundo?', '¿tienes en color rojo?'),
+              (ej: 'de [Marca A] o de [Marca B] ?', '¿cuánto cuesta el segundo?', '¿tienes en color rojo?', '¿y colonias?'),
               analízala OBLIGATORIAMENTE en conjunto con los turnos previos de la conversación.
             - Propaga la categoría, tipo de producto o producto base discutido (ej: si antes hablaron de
               'perfumes para mujer', y ahora dice 'de [Marca A] o de [Marca B] ?', la búsqueda debe ser de 'perfumes' o 'fragancias'
               para cada marca indicada, NUNCA la frase genérica 'productos destacados').
+            - PROPAGACIÓN OBLIGATORIA DE PÚBLICO OBJETIVO Y GÉNERO:
+              Si en turnos previos el cliente especificó un público objetivo o género
+              (ej: 'masculino', 'hombre', 'caballero', 'para él', 'femenino', 'mujer', 'dama', 'para ella', 'infantil', 'niños'),
+              debes PRESERVARLO Y PROPAGARLO OBLIGATORIAMENTE a cualquier consulta de seguimiento elíptica
+              (ej: si antes preguntó 'perfumes masculinos...' y ahora dice '¿y colonias?', la búsqueda
+              debe ser 'colonia hombre masculino eau de toilette fragancia fresca', NUNCA únicamente 'colonias').
+              Ten presente que en el catálogo comercial, las fragancias masculinas ligeras suelen denominarse
+              'Eau de Toilette' o 'Parfum', mientras que el término 'Colonia' aislado suele corresponder a líneas femeninas o infantiles.
 
             HERRAMIENTAS DISPONIBLES:
             1. 'search_product_catalog': Búsqueda semántica híbrida en el catálogo. Argumentos:
@@ -353,6 +361,10 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
             2. Presenta de 1 a 4 opciones principales de manera clara y estructurada. Si provienen de 2 o más marcas comerciales distintas, agrúpalas ordenadamente por marca (*En [Marca]:*).
             3. Si el usuario solicitó una marca específica, restringe las opciones estrictamente a dicha marca sin mezclar otras marcas no deseadas.
             4. Invita con sutileza consultiva al cliente a cotizar o pedir alguno de los productos recomendados.
+            5. CONSISTENCIA DE PÚBLICO OBJETIVO Y GÉNERO:
+               Si la consulta actual o el contexto del diálogo previo determina un público objetivo (ej: masculino/hombre vs femenino/mujer vs infantil/niños), verifica rigurosamente que los productos recomendados correspondan a dicho público.
+               NUNCA recomiendes fragancias o colonias marcadamente femeninas si el cliente busca para hombre (o viceversa). Si los candidatos recuperados en la búsqueda pertenecen al género opuesto o no deseado, DESCÁRTALOS de tu respuesta.
+               Si no existen colonias estrictamente masculinas bajo el presupuesto pedido, acláralo amablemente y presenta alternativas masculinas disponibles (ej: Eau de Toilette masculinos o colonias corporales unisex), pero jamás sugieras líneas femeninas o de niñas.
         """
 
         system_prompt = self.build_synthesizer_system_prompt(
@@ -430,7 +442,7 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
             CRITERIOS (Calificación de 1.0 a 10.0):
             1. relevance_score: ¿La respuesta atiende de forma directa, útil y completa la necesidad del usuario considerando el contexto del diálogo?
             2. grounding_score: ¿Los productos, precios y SKUs mencionados provienen estrictamente de los PRODUCTOS DISPONIBLES sin ninguna alucinación?
-            3. constraints_score: ¿Se respetaron los filtros requeridos (marcas solicitadas sin mezclar marcas no deseadas, números de página, campañas, límites de presupuesto)?
+            3. constraints_score: ¿Se respetaron los filtros y restricciones del diálogo (público objetivo / género hombre/mujer/niños, marcas solicitadas sin mezclar marcas no deseadas, números de página, campañas, límites de presupuesto)? Si el diálogo solicita productos masculinos/hombre y se recomiendan artículos femeninos o infantiles, califica constraints_score con < 5.0 y desaprueba (is_approved = False) con crítica explícita.
             4. presentation_score: ¿Cumple con el estándar del sintetizador padre (agrupación limpia por marcas cuando hay 2 o más marcas distintas, formato de viñetas con **[SKU] Nombre**, precio en S/., tono consultivo sin jerga técnica y sin saludos redundantes si hay turnos previos)?
 
             REGLA DE APROBACIÓN (is_approved):
