@@ -144,6 +144,13 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
                - partner_id (int, opcional), customer_name (str, opcional), limit (int, opcional).
 
             PAUTAS DE PLANEAMIENTO:
+            - AJUSTE PROACTIVO DE TOP-K / LIMIT (BÚSQUEDA EXHAUSTIVA):
+              Si la consulta solicita un listado amplio o exhaustivo (ej: 'dame todos los perfumes...', 'qué opciones tienes', 'muéstrame todo el catálogo'),
+              o si el cliente especifica un presupuesto máximo (ej: 'menor de 50', 'hasta 60 soles', 'el más barato'), o un rango de precios (ej: 'entre 40 y 80'):
+              DEBES fijar proactivamente 'limit=15' o 'limit=20' en 'search_product_catalog' (en lugar del default de 8) para realizar una búsqueda exhaustiva
+              que explore todos los escalones de precios del catálogo.
+              Si el presupuesto solicitado es bajo (ej: < S/. 50 o < S/. 80), expande los términos de búsqueda a categorías afines accesibles
+              (ej: query='perfume colonia fragancia corporal masculina hombre', limit=20) seguido de 'filter_and_sort_products'.
             - Si el usuario pide recomendaciones personalizadas ("según lo que suelo comprar", "¿qué me sugieres?"),
               invoca 'get_customer_purchase_history' para conocer sus preferencias antes de buscar en el catálogo.
             - Si el usuario pide un producto puntual o menciona marcas, páginas o campañas ("labial de [Marca] pág 12"),
@@ -151,7 +158,7 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
             - Si el usuario pide comparar marcas explícitamente ("compara [Marca A] y [Marca B]"), planea búsquedas específicas
               para cada marca y consolida las opciones.
             - Si el usuario especifica un presupuesto máximo o pide "el más barato", planea 'search_product_catalog'
-              seguido de 'filter_and_sort_products'.
+              con limit=15 o 20 seguido de 'filter_and_sort_products'.
             - Si el usuario busca productos complementarios a uno ya seleccionado, usa 'get_cross_sell_recommendations'.
         """
 
@@ -163,8 +170,10 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
             "{critique}"
             Sugerencias de remediación: {remedy_suggestions}
 
-            DEBES AJUSTAR EL PLAN: reformula los términos de búsqueda, relaja o afina los filtros de presupuesto
-            o utiliza herramientas complementarias para satisfacer el requerimiento.
+            DEBES AJUSTAR EL PLAN:
+            1. Aumenta el limit/top-k a 20 o 25 en 'search_product_catalog' para una búsqueda aún más profunda.
+            2. Si la categoría estricta (ej: perfumes) no tiene opciones bajo el presupuesto, busca categorías complementarias o sustitutas más accesibles del mismo público (ej: colonias corporales, eau de toilette, desodorantes).
+            3. Si ningún producto cumple estrictamente con el presupuesto máximo, usa 'filter_and_sort_products' con sort_by='price_asc' sin max_price estricto para recuperar las opciones más económicas disponibles en catálogo y poder orientar al cliente.
             """
 
         user_content = f"""
@@ -195,9 +204,12 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
                     if isinstance(m, HumanMessage) and m.content:
                         fallback_query = f"{m.content} {raw_query}"
                         break
+            # Ajuste proactivo de limit en fallback si es exhaustivo o con precio
+            f_lower = raw_query.lower()
+            fallback_limit = 15 if any(w in f_lower for w in ["todo", "todos", "barato", "menos de", "hasta", "presupuesto", "precio", "rango"]) else 8
             planned_tools = [{
                 "tool_name": "search_product_catalog",
-                "arguments": {"query": fallback_query, "limit": 8, "user_id": user_id or 5},
+                "arguments": {"query": fallback_query, "limit": fallback_limit, "user_id": user_id or 5},
                 "purpose": "Búsqueda estándar de catálogo.",
             }]
             extracted_meta = {}
@@ -235,6 +247,44 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
             if "user_id" in t_args and t_args["user_id"] is None:
                 t_args["user_id"] = user_id
 
+            # Inyectar candidatos y precios actualizados en filter_and_sort_products si no vinieron
+            if t_name == "filter_and_sort_products":
+                if not t_args.get("products"):
+                    t_args["products"] = list(candidate_products)
+                skus_to_price = [
+                    p.get("sku") for p in t_args["products"]
+                    if p.get("sku") and p.get("price") is None
+                ]
+                if skus_to_price:
+                    get_details_fn = self._tools_registry.get("get_product_odoo_details")
+                    if get_details_fn:
+                        try:
+                            price_res = await invoke_advisor_tool(
+                                self._tools_registry,
+                                "get_product_odoo_details",
+                                {"skus": skus_to_price[:20]},
+                            )
+                            if isinstance(price_res, dict) and "products" in price_res:
+                                d_sku = {d.get("sku"): d for d in price_res["products"] if isinstance(d, dict)}
+                                for p in t_args["products"]:
+                                    s = p.get("sku")
+                                    if s in d_sku:
+                                        p["price"] = d_sku[s].get("price")
+                                        p["currency"] = d_sku[s].get("currency")
+                                        p["uom"] = d_sku[s].get("uom")
+                                        if d_sku[s].get("sales_description"):
+                                            p["sales_description"] = d_sku[s].get("sales_description")
+                                for p in candidate_products:
+                                    s = p.get("sku")
+                                    if s in d_sku:
+                                        p["price"] = d_sku[s].get("price")
+                                        p["currency"] = d_sku[s].get("currency")
+                                        p["uom"] = d_sku[s].get("uom")
+                                        if d_sku[s].get("sales_description"):
+                                            p["sales_description"] = d_sku[s].get("sales_description")
+                        except Exception as pe:
+                            logger.warning(f"Error enriqueciendo precios previos a filtrado: {pe}")
+
             logger.info(f"product_advisor: Ejecutando herramienta '{t_name}' con args {t_args}")
             res = await invoke_advisor_tool(self._tools_registry, t_name, t_args)
 
@@ -259,7 +309,20 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
 
             elif t_name == "filter_and_sort_products":
                 if isinstance(res, list):
-                    candidate_products = res
+                    if not res and candidate_products:
+                        logger.info(
+                            "product_advisor: filter_and_sort_products descartó todos los candidatos por presupuesto. "
+                            "Preservando opciones disponibles más económicas como respaldo consultivo."
+                        )
+                        sorted_fallback = sorted(
+                            candidate_products,
+                            key=lambda x: (x.get("price") is None, float(x.get("price") or 999999))
+                        )
+                        for item in sorted_fallback[:3]:
+                            item["budget_exceeded"] = True
+                        candidate_products = sorted_fallback[:3]
+                    else:
+                        candidate_products = res
 
             elif t_name == "get_customer_purchase_history":
                 if isinstance(res, dict):
@@ -365,6 +428,9 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
                Si la consulta actual o el contexto del diálogo previo determina un público objetivo (ej: masculino/hombre vs femenino/mujer vs infantil/niños), verifica rigurosamente que los productos recomendados correspondan a dicho público.
                NUNCA recomiendes fragancias o colonias marcadamente femeninas si el cliente busca para hombre (o viceversa). Si los candidatos recuperados en la búsqueda pertenecen al género opuesto o no deseado, DESCÁRTALOS de tu respuesta.
                Si no existen colonias estrictamente masculinas bajo el presupuesto pedido, acláralo amablemente y presenta alternativas masculinas disponibles (ej: Eau de Toilette masculinos o colonias corporales unisex), pero jamás sugieras líneas femeninas o de niñas.
+            6. MANEJO DE PRESUPUESTO Y RANGOS DE PRECIO:
+               Si el cliente especificó un rango o tope de presupuesto (ej: "menos de 50 soles", "hasta 60", "barato") y los productos disponibles en catálogo superan ligeramente dicho monto (indicado con budget_exceeded=True o precios mayores), NUNCA digas simplemente "no tenemos nada" ni devuelvas una lista vacía.
+               Actúa como un asesor consultivo experto: explica amablemente que actualmente las opciones disponibles inician desde [precio mínimo disponible] y presenta con entusiasmo las alternativas masculinas o afines más accesibles y cercanas del catálogo para que el cliente pueda decidir.
         """
 
         system_prompt = self.build_synthesizer_system_prompt(
@@ -442,7 +508,7 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
             CRITERIOS (Calificación de 1.0 a 10.0):
             1. relevance_score: ¿La respuesta atiende de forma directa, útil y completa la necesidad del usuario considerando el contexto del diálogo?
             2. grounding_score: ¿Los productos, precios y SKUs mencionados provienen estrictamente de los PRODUCTOS DISPONIBLES sin ninguna alucinación?
-            3. constraints_score: ¿Se respetaron los filtros y restricciones del diálogo (público objetivo / género hombre/mujer/niños, marcas solicitadas sin mezclar marcas no deseadas, números de página, campañas, límites de presupuesto)? Si el diálogo solicita productos masculinos/hombre y se recomiendan artículos femeninos o infantiles, califica constraints_score con < 5.0 y desaprueba (is_approved = False) con crítica explícita.
+            3. constraints_score: ¿Se respetaron los filtros y restricciones del diálogo (público objetivo / género hombre/mujer/niños, marcas solicitadas sin mezclar marcas no deseadas, números de página, campañas, límites de presupuesto)? Si el diálogo solicita productos masculinos/hombre y se recomiendan artículos femeninos o infantiles, califica constraints_score con < 5.0 y desaprueba (is_approved = False) con crítica explícita. Si el usuario fijó un presupuesto ajustado y el catálogo solo tiene opciones de precio ligeramente mayor, califica POSITIVAMENTE (>= 8.0) si el asesor explicó con cortesía el rango de precios disponible y presentó las opciones más cercanas en lugar de dejar al cliente sin respuesta.
             4. presentation_score: ¿Cumple con el estándar del sintetizador padre (agrupación limpia por marcas cuando hay 2 o más marcas distintas, formato de viñetas con **[SKU] Nombre**, precio en S/., tono consultivo sin jerga técnica y sin saludos redundantes si hay turnos previos)?
 
             REGLA DE APROBACIÓN (is_approved):

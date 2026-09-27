@@ -726,4 +726,134 @@ async def test_rubric_rejects_gender_mismatch():
     assert _route_after_rubric(rubric_res) == "plan_and_select_tools"
 
 
+@pytest.mark.asyncio
+async def test_proactive_top_k_for_exhaustive_and_budget_queries():
+    """Verifica que para consultas exhaustivas o con límites de presupuesto, el planificador incorpore
+    la directriz de aumentar el top-k/limit a 15-20 y el fallback asigne limit=15."""
+    mock_llm = MagicMock(spec=BaseChatModel)
+    nodes = ProductAdvisorNodes(llm=mock_llm)
+
+    # Caso 1: Verificar contenido del System Prompt para Top-K proactivo
+    nodes._planner = AsyncMock()
+    nodes._planner.ainvoke.return_value = AdvisorPlan(
+        reasoning="Consulta exhaustiva: fijar limit=15 para perfumes masculinos Yanbal",
+        strategy="direct_search",
+        tool_calls=[
+            AdvisorToolCall(
+                tool_name="search_product_catalog",
+                arguments={"query": "perfume hombre", "marca": "Yanbal", "limit": 15},
+                purpose="Búsqueda exhaustiva",
+            )
+        ],
+        extracted_metadata={"marca": "Yanbal", "limit": 15},
+    )
+
+    state: ProductAdvisorState = {
+        "raw_query": "dame todos los perfumes para hombre s de yambal",
+        "messages": [],
+    }
+
+    plan_res = await nodes.plan_and_select_tools(state)
+    assert plan_res["planned_tools"][0]["arguments"]["limit"] == 15
+
+    # Verificar que el system prompt contenga la directriz de top-k exhaustivo
+    planner_calls = nodes._planner.ainvoke.call_args[0][0]
+    planner_sys_prompt = planner_calls[0].content
+    assert "AJUSTE PROACTIVO DE TOP-K / LIMIT (BÚSQUEDA EXHAUSTIVA)" in planner_sys_prompt
+    assert "limit=15" in planner_sys_prompt or "limit=20" in planner_sys_prompt
+
+    # Caso 2: Verificar que el fallback automático asigne limit=15 cuando hay palabras de exhaustividad o presupuesto
+    nodes._planner.ainvoke.side_effect = Exception("Planner failure simulation")
+    fallback_res = await nodes.plan_and_select_tools(state)
+    assert len(fallback_res["planned_tools"]) == 1
+    assert fallback_res["planned_tools"][0]["arguments"]["limit"] == 15
+
+
+@pytest.mark.asyncio
+async def test_execute_tools_budget_exceeded_fallback():
+    """Verifica que si filter_and_sort_products descarta todos los productos por precio,
+    execute_tools preserve los 3 candidatos más económicos marcados con budget_exceeded=True."""
+    mock_llm = MagicMock(spec=BaseChatModel)
+    nodes = ProductAdvisorNodes(llm=mock_llm)
+
+    # Registro con mock tools
+    mock_filter_tool = MagicMock(return_value=[])  # Simula que ninguno estuvo bajo el presupuesto
+    nodes._tools_registry = {
+        "filter_and_sort_products": mock_filter_tool,
+        "get_product_odoo_details": AsyncMock(return_value={"products": []}),
+    }
+
+    initial_candidates = [
+        {"sku": "SKU-EXPENSIVE", "name": "Perfume Lujo", "price": 180.0},
+        {"sku": "SKU-CHEAP1", "name": "Colonia Básica 1", "price": 65.0},
+        {"sku": "SKU-CHEAP2", "name": "Colonia Básica 2", "price": 70.0},
+        {"sku": "SKU-MID", "name": "Colonia Media", "price": 95.0},
+    ]
+
+    state: ProductAdvisorState = {
+        "raw_query": "perfumes de hombre menos de 50 soles",
+        "planned_tools": [
+            {
+                "tool_name": "filter_and_sort_products",
+                "arguments": {"max_price": 50.0},
+            }
+        ],
+        "candidate_products": initial_candidates,
+    }
+
+    result = await nodes.execute_tools(state)
+    retained_candidates = result["candidate_products"]
+
+    # Debe haber retenido 3 productos más económicos en lugar de dejar la lista vacía
+    assert len(retained_candidates) == 3
+    assert retained_candidates[0]["sku"] == "SKU-CHEAP1"
+    assert retained_candidates[0].get("budget_exceeded") is True
+    assert retained_candidates[1]["sku"] == "SKU-CHEAP2"
+    assert retained_candidates[1].get("budget_exceeded") is True
+
+
+@pytest.mark.asyncio
+async def test_synthesize_draft_and_rubric_budget_guideline():
+    """Verifica que el prompt del sintetizador contenga la regla de manejo de presupuesto
+    y la rúbrica evalúe positivamente la orientación consultiva de rangos."""
+    mock_llm = MagicMock(spec=BaseChatModel)
+    nodes = ProductAdvisorNodes(llm=mock_llm)
+
+    nodes._synthesizer = AsyncMock()
+    nodes._synthesizer.ainvoke.return_value = FinalAnswer(
+        response_text="Actualmente las fragancias para hombre inician desde S/. 65.00. Te presento: [SKU-CHEAP1] Colonia Básica (S/. 65.00)."
+    )
+
+    state: ProductAdvisorState = {
+        "raw_query": "perfumes de hombre de menos de 40 soles",
+        "candidate_products": [{"sku": "SKU-CHEAP1", "name": "Colonia Básica", "price": 65.0, "budget_exceeded": True}],
+        "draft_response": "Actualmente las fragancias para hombre inician desde S/. 65.00. Te presento: [SKU-CHEAP1] Colonia Básica (S/. 65.00).",
+        "messages": [],
+    }
+
+    # 1. Verificar synthesize_draft
+    draft_res = await nodes.synthesize_draft(state)
+    synth_calls = nodes._synthesizer.ainvoke.call_args[0][0]
+    synth_sys_prompt = synth_calls[0].content
+    assert "MANEJO DE PRESUPUESTO Y RANGOS DE PRECIO" in synth_sys_prompt
+    assert "budget_exceeded" in synth_sys_prompt
+
+    # 2. Verificar rubric_evaluator_judge
+    nodes._rubric_judge = AsyncMock()
+    nodes._rubric_judge.ainvoke.return_value = QualityRubricEvaluation(
+        relevance_score=9.0,
+        grounding_score=9.5,
+        constraints_score=9.0,
+        presentation_score=9.0,
+        is_approved=True,
+    )
+
+    rubric_res = await nodes.rubric_evaluator_judge(state)
+    judge_calls = nodes._rubric_judge.ainvoke.call_args[0][0]
+    judge_sys_prompt = judge_calls[0].content
+    assert "ligeramente mayor" in judge_sys_prompt or "límites de presupuesto" in judge_sys_prompt
+    assert rubric_res["meets_rubric"] is True
+
+
+
 

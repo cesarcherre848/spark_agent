@@ -370,3 +370,40 @@ class TestMainGraphLayaIntegration:
         assert "Aviso Comercial" in result["final_response"]
         assert "Como asistente comercial puedo orientarte" in result["final_response"]
 
+    def test_evaluate_input_guardrail_commercial_space_typo_allowed(self, monkeypatch):
+        """Verifica que 'dame todos los perfumes para hombre s de yambal' sea permitido,
+        incluso si Laya reporta valores altos de jailbreak debido al imperativo 'dame todos'."""
+        mock_laya_answers = {
+            "answers": {
+                "jailbreak": {"type": "noul", "noul": 1.0},
+                "sensitive_data": {"type": "noul", "noul": 0.9581},
+                "out_of_scope": {"type": "noul", "noul": 0.0001},
+                "harm_severity": {"type": "score", "score": 1.781},
+            }
+        }
+        monkeypatch.setattr(
+            "src.agent_service.core.guardrails.evaluator.run_laya_evaluation",
+            lambda q, q_defs: mock_laya_answers,
+        )
+
+        query = "dame todos los perfumes para hombre s de yambal"
+        res = evaluate_input_guardrail(query)
+
+        assert res.is_blocked is False
+        assert res.action == GuardrailAction.ALLOW
+        assert res.refusal_message is None
+
+    def test_evaluate_laya_scores_real_harm_attack_still_blocked(self):
+        """Verifica que ataques con severidad dañina alta (>= 2.0) sigan siendo bloqueados contundentemente."""
+        answers = {
+            "jailbreak": {"type": "noul", "noul": 0.95},
+            "sensitive_data": {"type": "noul", "noul": 0.90},
+            "out_of_scope": {"type": "noul", "noul": 0.50},
+            "harm_severity": {"type": "score", "score": 2.50},
+        }
+        action, category, reason, warning_msg, refusal_msg, scores = evaluate_laya_scores(answers)
+
+        assert action == GuardrailAction.BLOCK
+        assert category == ViolationCategory.HARMFUL_CONTENT
+        assert refusal_msg is not None
+

@@ -23,13 +23,44 @@ from src.agent_service.core.guardrails.rules import (
 )
 from src.agent_service.core.guardrails.laya_client import run_laya_evaluation
 
+import re
+
 logger = logging.getLogger(__name__)
+
+COMMERCIAL_CATALOG_KEYWORDS = {
+    "perfume", "perfumes", "colonia", "colonias", "fragancia", "fragancias",
+    "labial", "labiales", "crema", "cremas", "maquillaje", "rimel", "máscara",
+    "shampoo", "desodorante", "bloqueador", "protector", "reloj", "aretes",
+    "yanbal", "yambal", "esika", "ésika", "essika", "cyzone", "lbel", "l'bel",
+    "catalogo", "catálogo", "precio", "precios", "cuanto", "cuánto", "costo",
+    "hombre", "hombres", "mujer", "mujeres", "niño", "niños", "niña", "niñas",
+    "comprar", "cotizar", "pedido", "producto", "productos", "opcion", "opciones",
+    "gama", "linea", "línea", "marca", "marcas", "ofertas", "descuentos"
+}
 
 
 def _strip_accents(text: str) -> str:
     """Elimina acentos y tildes para robustecer la comparación regex."""
     nfkd_form = unicodedata.normalize("NFKD", text)
     return "".join([c for c in nfkd_form if not unicodedata.combining(c)])
+
+
+def _clean_mobile_space_typos(text: str) -> str:
+    """Repara letras sueltas y errores de espaciado comunes en móviles (ej: 'hombre s de' -> 'hombres de')
+    para evitar que letras huérfanas activen falsos positivos de token splitting en Laya."""
+    if not text:
+        return text
+    cleaned = re.sub(r"\b([a-zA-ZáéíóúÁÉÍÓÚñÑ]{2,})\s+([sS])\b", r"\1\2", text)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
+def is_explicit_commercial_inquiry(text: str) -> bool:
+    """Verifica si la consulta contiene términos comerciales inequívocos de catálogo."""
+    if not text:
+        return False
+    words = {w.strip("?,.:;!¡¿\"'()").lower() for w in text.split()}
+    return bool(words.intersection(COMMERCIAL_CATALOG_KEYWORDS))
 
 
 def evaluate_input_guardrail(raw_query: Optional[str]) -> GuardrailResult:
@@ -145,7 +176,8 @@ def evaluate_input_guardrail(raw_query: Optional[str]) -> GuardrailResult:
     # CAPA 2: LAYA SYSTEM 1 DECISION ENGINE (~30ms)
     # =========================================================================
     try:
-        laya_result = run_laya_evaluation(query, LAYA_GUARD_QUESTIONS)
+        query_cleaned = _clean_mobile_space_typos(query)
+        laya_result = run_laya_evaluation(query_cleaned, LAYA_GUARD_QUESTIONS)
     except Exception as exc:
         logger.warning(f"Excepción durante la ejecución de Laya ('{exc}'). Fallback a Capa 1 determinista.")
         laya_result = None
@@ -154,7 +186,27 @@ def evaluate_input_guardrail(raw_query: Optional[str]) -> GuardrailResult:
         answers = laya_result.get("answers", {})
         action, category, reason, warning_msg, refusal_msg, scores = evaluate_laya_scores(answers)
 
+        # Salvaguarda de Dominio Comercial: si Capa 1 no detectó transgresiones reales, la consulta es
+        # explícitamente de catálogo y Laya determinó que no es severamente dañina (< 2.0) ni fuera de ámbito (<= 0.30):
+        is_comm = is_explicit_commercial_inquiry(query) or is_explicit_commercial_inquiry(query_cleaned)
+        p_out_scope = scores.get("out_of_scope", 0.0)
+        score_harm = scores.get("harm_severity", 0.0)
+        if is_comm and p_out_scope <= 0.30 and score_harm < 2.0:
+            if action != GuardrailAction.ALLOW:
+                logger.info(
+                    f"Guardrail Capa 2: Desactivando falso {action.value} de Laya ({category.value}) para consulta comercial legítima: '{raw_query}'"
+                )
+            return GuardrailResult(
+                action=GuardrailAction.ALLOW,
+                is_blocked=False,
+                is_warning=False,
+                category=ViolationCategory.NONE,
+                reason="Consulta comercial legítima protegida contra falsos positivos de Laya.",
+                scores=scores,
+            )
+
         if action == GuardrailAction.BLOCK:
+
             logger.warning(
                 f"Guardrail Capa 2 (Laya) Bloqueado [{category.value}]: {reason} - Scores: {scores} - Query: '{raw_query}'"
             )

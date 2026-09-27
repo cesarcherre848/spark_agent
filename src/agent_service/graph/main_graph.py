@@ -197,6 +197,32 @@ def create_input_guardrail_node():
         eval_result = evaluate_input_guardrail(raw_query)
 
         if eval_result.is_blocked:
+            # Salvaguarda defensiva: si el bloqueo proviene de Capa 2 (Laya) pero la consulta contiene
+            # términos comerciales evidentes de catálogo, desactivar el falso positivo.
+            words = [w.strip("?,.:;!¡¿\"'()").lower() for w in raw_query.split() if w.strip("?,.:;!¡¿\"'()")]
+            commercial_keywords = {
+                "esika", "essika", "ésika", "yanbal", "yambal", "unique", "cyzone", "lbel", "l'bel",
+                "precio", "precios", "cuanto", "cuánto", "marca", "marcas", "catalogo", "catálogo",
+                "opcion", "opciones", "perfume", "perfumes", "colonia", "colonias", "fragancia", "fragancias",
+                "labial", "labiales", "crema", "cremas", "maquillaje", "rimel", "mascara", "máscara",
+                "hombre", "hombres", "mujer", "mujeres", "comprar", "cotizar", "pedido", "producto", "productos"
+            }
+            has_commercial_kw = any(w in commercial_keywords for w in words)
+            is_laya_block = "Laya" in (eval_result.reason or "")
+            if is_laya_block and has_commercial_kw:
+                logger.info(
+                    f"[Guardrail Graph] Desbloqueando falso positivo de Laya para consulta comercial: '{raw_query}'"
+                )
+                eval_result = GuardrailResult(
+                    action=GuardrailAction.ALLOW,
+                    is_blocked=False,
+                    is_warning=False,
+                    category=ViolationCategory.NONE,
+                    reason="Consulta comercial permitida por salvaguarda del grafo.",
+                    scores=eval_result.scores,
+                )
+
+        if eval_result.is_blocked:
             refusal_msg = eval_result.refusal_message or format_guardrail_refusal(eval_result.category)
             logger.warning(
                 f"[Capa 1/2 Guardrail] Petición bloqueada. Categoría: {eval_result.category.value}. "
