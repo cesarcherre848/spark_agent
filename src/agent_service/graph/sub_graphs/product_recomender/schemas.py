@@ -60,6 +60,18 @@ class RecommendationIntentExtraction(BaseModel):
         default_factory=list,
         description="Atributos o beneficios explícitamente requeridos (ej: ['a prueba de agua', 'larga duración', 'mate']).",
     )
+    pagina: Optional[int] = Field(
+        default=None,
+        description="Número de página del catálogo si el usuario la indicó explícitamente (ej: 'pág 12' -> 12).",
+    )
+    edicion: Optional[str] = Field(
+        default=None,
+        description="Campaña o edición del catálogo si se indicó explícitamente (ej: 'C10', 'C-15').",
+    )
+    marca: Optional[str] = Field(
+        default=None,
+        description="Marca comercial específica requerida (ej: 'Yanbal', 'Ésika', 'Belcorp').",
+    )
     search_query: str = Field(
         default="productos recomendados",
         description="Consulta semántica depurada optimizada para búsqueda vectorial híbrida en el catálogo de productos.",
@@ -77,6 +89,9 @@ class EnrichedRecommendedProduct(BaseModel):
     uom: Optional[str] = Field(default="Units", description="Unidad de medida comercial.")
     description: str = Field(default="", description="Descripción comercial de venta y características.")
     relation_type: str = Field(default="general_recommendation", description="Tipo de relación comercial asociada.")
+    pagina: Optional[int] = Field(default=None, description="Número de página del catálogo oficial.")
+    edicion: Optional[str] = Field(default=None, description="Edición o campaña del catálogo.")
+    marca: Optional[str] = Field(default=None, description="Marca comercial del producto.")
     recommendation_reason: Optional[str] = Field(
         default=None,
         description="Motivo o argumento comercial por el cual este producto se recomienda al cliente.",

@@ -422,12 +422,13 @@ def create_chat_model(
                 "o pásala explícitamente en create_chat_model(api_key=...)."
             )
 
+        timeout_val = kwargs.pop("timeout", settings.request_timeout)
         google_kwargs = {
             "model": target_model,
             "google_api_key": target_key,
             "temperature": target_temp,
-            "max_retries": 2,
-            "timeout": 25.0,
+            "max_retries": 1,
+            "timeout": timeout_val,
             **kwargs,
         }
         if target_max_tokens is not None:

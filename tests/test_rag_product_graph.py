@@ -317,3 +317,80 @@ async def test_product_rag_judge_none_defense():
     assert final_state["is_sufficient"] is True
     assert final_state["matched_skus"] == ["SKU-99"]
     assert "Loción Jazmín" in final_state["final_response"]
+
+
+def test_format_candidates_with_metadata_tags():
+    """Verifica que format_candidates_for_prompt incluya los tags de página, edición y marca."""
+    docs = [
+        Document(
+            page_content="Labial mate de larga duración.",
+            metadata={
+                "product_id": 10,
+                "sku": "LAB-001",
+                "name": "Labial Mate Velvet",
+                "pagina": 124,
+                "edicion": "C10",
+                "marca": "Yanbal",
+            },
+        )
+    ]
+    result = format_candidates_for_prompt(docs)
+    assert "[1] [SKU: LAB-001] Labial Mate Velvet [Yanbal | Campaña C10 | Pág. 124]" in result
+
+
+@pytest.mark.asyncio
+async def test_retrieve_products_with_metadata_filters(mock_vector_store, sample_documents):
+    """Verifica que retrieve_products inyecte los filtros de metadatos en ProductCatalogFilter."""
+    from src.agent_service.graph.sub_graphs.product_rag.nodes import ProductRagNodes
+
+    mock_llm = MagicMock(spec=BaseChatModel)
+    nodes = ProductRagNodes(llm=mock_llm, vector_store=mock_vector_store)
+    mock_vector_store.ahybrid_search.return_value = sample_documents
+
+    state = {
+        "raw_query": "labiales Yanbal pág 12",
+        "refined_query": "labiales",
+        "user_id": 5,
+        "metadata_filters": {
+            "pagina": 12,
+            "edicion": "C10",
+            "marca": "Yanbal",
+        },
+    }
+
+    result = await nodes.retrieve_products(state)
+    assert len(result["retrieved_products"]) == 2
+    mock_vector_store.ahybrid_search.assert_awaited_once()
+    call_kwargs = mock_vector_store.ahybrid_search.call_args.kwargs
+    catalog_filter = call_kwargs.get("filters")
+    assert catalog_filter is not None
+    assert catalog_filter.pagina == 12
+    assert catalog_filter.edicion == "C10"
+    assert catalog_filter.marca == "Yanbal"
+
+
+@pytest.mark.asyncio
+async def test_normalize_query_extracts_metadata(mock_vector_store):
+    """Verifica que normalize_query extraiga pagina, edicion y marca hacia metadata_filters."""
+    from src.agent_service.graph.sub_graphs.product_rag.nodes import ProductRagNodes
+
+    mock_llm = MagicMock(spec=BaseChatModel)
+    mock_normalizer = AsyncMock()
+    mock_normalizer.ainvoke.return_value = NormalizedQuery(
+        search_query="labial mate rojo",
+        pagina=124,
+        edicion="C10",
+        marca="Yanbal",
+    )
+    mock_llm.with_structured_output.return_value = mock_normalizer
+
+    nodes = ProductRagNodes(llm=mock_llm, vector_store=mock_vector_store)
+    state = {"raw_query": "labiales de Yanbal de la página 124 de C10"}
+
+    result = await nodes.normalize_query(state)
+    assert result["refined_query"] == "labial mate rojo"
+    assert result["metadata_filters"] == {
+        "pagina": 124,
+        "edicion": "C10",
+        "marca": "Yanbal",
+    }

@@ -19,7 +19,7 @@ from langchain_core.documents import Document
 
 from src.agent_service.core.llms import bind_temperature, bind_structured_output
 from src.agent_service.core.llms.factory import extract_clean_text
-from src.agent_service.core.stores.product.vector_store import ProductVectorStore
+from src.agent_service.core.stores.product.vector_store import ProductVectorStore, normalize_brand
 from src.agent_service.core.stores.product.schemas import ProductCatalogFilter
 from src.agent_service.core.stores.product.odoo_client import OdooClient
 from src.agent_service.tools.sales_tools import get_shared_odoo_client
@@ -105,6 +105,9 @@ class ProductRecomenderNodes(BaseSynthesizerNode):
                - 'price_asc': si pide 'más baratos', 'económicos', 'menor precio', 'desde el más bajo', 'gangas'.
                - 'price_desc': si pide 'más caros', 'premium', 'alta gama', 'mayor precio'.
                - 'relevance': orden por defecto si no se piden superlativos de precio.
+            9. 'pagina': Número de página si el usuario la indicó explícitamente (ej: 'pág 12', 'página 124' -> 124).
+            10. 'edicion': Campaña o edición del catálogo si se indicó explícitamente (ej: 'C10', 'C-15' -> 'C10').
+            11. 'marca': Marca comercial específica solicitada. Normaliza errores ortográficos o variantes informales a la marca oficial del catálogo (ej: 'essika', 'esika' -> 'Ésika'; 'yanbal' -> 'Yanbal').
         """
 
         messages = [
@@ -143,6 +146,9 @@ class ProductRecomenderNodes(BaseSynthesizerNode):
             "max_price": extraction.max_price,
             "category": extraction.category,
             "required_attributes": extraction.required_attributes,
+            "pagina": extraction.pagina,
+            "edicion": extraction.edicion,
+            "marca": normalize_brand(extraction.marca),
         }
 
         return {
@@ -166,7 +172,18 @@ class ProductRecomenderNodes(BaseSynthesizerNode):
 
         user_id = state.get("user_id")
         user_id_int = int(user_id) if user_id and str(user_id).isdigit() else None
-        catalog_filter = ProductCatalogFilter(user_id=user_id_int) if user_id_int is not None else None
+        filters_dict = state.get("filters", {}) or {}
+        has_meta = any(filters_dict.get(k) is not None for k in ["pagina", "edicion", "marca"])
+        catalog_filter = (
+            ProductCatalogFilter(
+                user_id=user_id_int,
+                pagina=filters_dict.get("pagina"),
+                edicion=filters_dict.get("edicion"),
+                marca=filters_dict.get("marca"),
+            )
+            if (user_id_int is not None or has_meta)
+            else None
+        )
 
         docs: List[Document] = []
         if self._vector_store:
@@ -233,6 +250,7 @@ class ProductRecomenderNodes(BaseSynthesizerNode):
             )
             pid = getattr(odoo_prod, "product_id", None) or doc.metadata.get("product_id")
 
+            doc_meta = doc.metadata or {}
             enriched.append({
                 "product_id": pid,
                 "sku": sku,
@@ -243,12 +261,15 @@ class ProductRecomenderNodes(BaseSynthesizerNode):
                 "uom": uom,
                 "description": desc.strip(),
                 "relation_type": relation_type,
+                "pagina": doc_meta.get("pagina"),
+                "edicion": doc_meta.get("edicion"),
+                "marca": doc_meta.get("marca"),
             })
 
         return {"enriched_products": enriched}
 
     async def apply_user_filters(self, state: ProductRecomenderState) -> dict:
-        """Nodo 4: Aplica filtros deterministas (presupuesto, categoría, exclusión de producto base y ordenamiento)."""
+        """Nodo 4: Aplica filtros deterministas (presupuesto, categoría, metadatos, exclusión de producto base y ordenamiento)."""
         enriched: List[Dict[str, Any]] = state.get("enriched_products", [])
         filters = state.get("filters", {}) or {}
         base_product = state.get("base_product")
@@ -257,6 +278,9 @@ class ProductRecomenderNodes(BaseSynthesizerNode):
         min_price = filters.get("min_price")
         max_price = filters.get("max_price")
         cat_filter = str(filters.get("category") or "").strip().lower()
+        pagina_filter = filters.get("pagina")
+        edicion_filter = str(filters.get("edicion") or "").strip().lower()
+        marca_filter = str(filters.get("marca") or "").strip().lower()
 
         filtered: List[Dict[str, Any]] = []
         for p in enriched:
@@ -282,7 +306,22 @@ class ProductRecomenderNodes(BaseSynthesizerNode):
                 if float(p_price) < float(min_price):
                     continue
 
-            # 4. Filtro de categoría (si fue especificado explícitamente)
+            # 4. Filtro de metadatos de producto (página, edición, marca)
+            if pagina_filter is not None and p.get("pagina") is not None:
+                if int(p["pagina"]) != int(pagina_filter):
+                    continue
+
+            if edicion_filter:
+                p_edicion = str(p.get("edicion") or "").strip().lower()
+                if p_edicion and p_edicion != edicion_filter:
+                    continue
+
+            if marca_filter:
+                p_marca = str(p.get("marca") or "").strip().lower()
+                if p_marca and marca_filter not in p_marca and p_marca not in marca_filter:
+                    continue
+
+            # 5. Filtro de categoría (si fue especificado explícitamente)
             if cat_filter:
                 terms = [t for t in cat_filter.replace("-", " ").replace("_", " ").split() if len(t) > 2]
                 stem_terms = set(terms)

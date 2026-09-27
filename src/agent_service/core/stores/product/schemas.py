@@ -2,6 +2,21 @@ from typing import List, Optional, Literal, Dict
 from pydantic import BaseModel, Field
 
 
+class ProductMetadataFilter(BaseModel):
+    pagina: Optional[int] = Field(
+        default=None,
+        description="Número de página del catálogo (ej: 124).",
+    )
+    edicion: Optional[str] = Field(
+        default=None,
+        description="Código de campaña o edición del catálogo (ej: 'C10', 'C-15').",
+    )
+    marca: Optional[str] = Field(
+        default=None,
+        description="Marca comercial del producto (ej: 'Yanbal', 'Ésika', 'Belcorp').",
+    )
+
+
 class ProductCatalogFilter(BaseModel):
     user_id: Optional[int] = Field(
         default=None,
@@ -10,6 +25,22 @@ class ProductCatalogFilter(BaseModel):
     allowed_vendor_ids: Optional[List[int]] = Field(
         default=None,
         description="IDs de res_partner (proveedores) que el usuario tiene autorizados según sus equipos CRM.",
+    )
+    pagina: Optional[int] = Field(
+        default=None,
+        description="Filtro directo por número de página del catálogo.",
+    )
+    edicion: Optional[str] = Field(
+        default=None,
+        description="Filtro directo por edición o campaña de catálogo (ej: 'C10').",
+    )
+    marca: Optional[str] = Field(
+        default=None,
+        description="Filtro directo por marca comercial (ej: 'Yanbal', 'Ésika').",
+    )
+    metadata: Optional[ProductMetadataFilter] = Field(
+        default=None,
+        description="Contenedor estructurado de filtros de metadatos de producto.",
     )
 
 

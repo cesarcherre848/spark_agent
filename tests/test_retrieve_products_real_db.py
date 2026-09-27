@@ -84,3 +84,90 @@ async def test_retrieve_products_with_real_database(db_conninfo, embedding_servi
 
     finally:
         await pool.close()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_retrieve_products_with_metadata_tags_real_db(db_conninfo, embedding_service):
+    """Prueba de integración real filtrando por marca Yanbal y edición C10 en la vista de metadatos."""
+    pool = AsyncConnectionPool(conninfo=db_conninfo, min_size=1, max_size=2, open=False)
+    await pool.open()
+
+    try:
+        vector_store = ProductVectorStore(
+            pool=pool,
+            embedding_service=embedding_service,
+            table_name="product_vector_embedding",
+            embedding_column="embedding_1024",
+        )
+
+        mock_llm = MagicMock(spec=BaseChatModel)
+        nodes = ProductRagNodes(llm=mock_llm, vector_store=vector_store, top_k=5)
+
+        state = {
+            "raw_query": "labial",
+            "refined_query": "labial",
+            "metadata_filters": {
+                "marca": "Yanbal",
+                "edicion": "C10",
+            },
+            "iteration_count": 0,
+        }
+
+        result = await nodes.retrieve_products(state)
+        docs = result["retrieved_products"]
+        assert len(docs) > 0, "Se esperaba encontrar productos de Yanbal C10"
+        for doc in docs:
+            assert doc.metadata.get("marca") == "Yanbal"
+            assert doc.metadata.get("edicion") == "C10"
+            assert "tags" in doc.metadata
+            assert doc.metadata["tags"]["marca"] == "Yanbal"
+            assert doc.metadata["tags"]["edicion"] == "C10"
+    finally:
+        await pool.close()
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_retrieve_products_esika_brand_variations_real_db(db_conninfo, embedding_service):
+    """Prueba que la búsqueda de Ésika funciona con tilde, sin tilde ('esika') y con doble s ('essika')."""
+    pool = AsyncConnectionPool(conninfo=db_conninfo, min_size=1, max_size=2, open=False)
+    await pool.open()
+
+    try:
+        vector_store = ProductVectorStore(
+            pool=pool,
+            embedding_service=embedding_service,
+            table_name="product_vector_embedding",
+            embedding_column="embedding_1024",
+        )
+
+        mock_llm = MagicMock(spec=BaseChatModel)
+        nodes = ProductRagNodes(llm=mock_llm, vector_store=vector_store, top_k=5)
+
+        for variant in ["Ésika", "esika", "essika"]:
+            state = {
+                "raw_query": "labiales mate",
+                "refined_query": "labiales mate",
+                "metadata_filters": {
+                    "marca": variant,
+                },
+                "user_id": 5,
+                "iteration_count": 0,
+            }
+
+            result = await nodes.retrieve_products(state)
+            docs = result["retrieved_products"]
+            assert len(docs) > 0, f"Se esperaba encontrar labiales de Ésika usando variante: '{variant}'"
+            for doc in docs:
+                assert doc.metadata.get("marca") == "Ésika"
+                assert "tags" in doc.metadata
+                assert doc.metadata["tags"]["marca"] == "Ésika"
+            assert any("labial" in doc.page_content.lower() or "mate" in doc.page_content.lower() for doc in docs)
+
+            # Confirmar que el SKU 06780 de Ésika está presente entre los primeros candidatos
+            skus = [d.metadata.get("sku") for d in docs]
+            assert "06780" in skus, f"El SKU 06780 (COLORFIX LABIAL) debe encontrarse para variante '{variant}'"
+    finally:
+        await pool.close()
+

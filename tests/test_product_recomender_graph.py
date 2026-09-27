@@ -808,5 +808,81 @@ def test_recommendation_intent_extraction_has_safe_defaults():
     assert extraction.search_query == "productos recomendados"
     assert extraction.top_k == 15
     assert extraction.sort_by == "relevance"
+    assert extraction.pagina is None
+    assert extraction.edicion is None
+    assert extraction.marca is None
+
+
+@pytest.mark.asyncio
+async def test_apply_user_filters_with_metadata_tags():
+    """Valida que apply_user_filters filtre estrictamente por pagina, edicion y marca."""
+    nodes = ProductRecomenderNodes(llm=MagicMock())
+    state: ProductRecomenderState = {
+        "enriched_products": [
+            {
+                "sku": "SKU-1",
+                "name": "Labial Rojo Yanbal C10",
+                "price": 50.0,
+                "pagina": 12,
+                "edicion": "C10",
+                "marca": "Yanbal",
+            },
+            {
+                "sku": "SKU-2",
+                "name": "Labial Nude Ésika C10",
+                "price": 45.0,
+                "pagina": 12,
+                "edicion": "C10",
+                "marca": "Ésika",
+            },
+            {
+                "sku": "SKU-3",
+                "name": "Labial Rosa Yanbal C15",
+                "price": 55.0,
+                "pagina": 18,
+                "edicion": "C-15",
+                "marca": "Yanbal",
+            },
+        ],
+        "filters": {
+            "marca": "Yanbal",
+            "edicion": "C10",
+            "pagina": 12,
+        },
+    }
+
+    result = await nodes.apply_user_filters(state)
+    filtered = result["filtered_products"]
+    assert len(filtered) == 1
+    assert filtered[0]["sku"] == "SKU-1"
+    assert filtered[0]["marca"] == "Yanbal"
+    assert filtered[0]["pagina"] == 12
+
+
+@pytest.mark.asyncio
+async def test_retrieve_candidate_products_with_metadata_filters(mock_vector_store):
+    """Valida que retrieve_candidate_products pase los filtros de metadatos al vector store."""
+    nodes = ProductRecomenderNodes(llm=MagicMock(), vector_store=mock_vector_store)
+    mock_vector_store.ahybrid_search.return_value = []
+
+    state: ProductRecomenderState = {
+        "search_query": "labiales hidratantes",
+        "top_k": 5,
+        "user_id": 5,
+        "filters": {
+            "pagina": 124,
+            "edicion": "C10",
+            "marca": "Yanbal",
+        },
+    }
+
+    await nodes.retrieve_candidate_products(state)
+    mock_vector_store.ahybrid_search.assert_awaited_once()
+    call_kwargs = mock_vector_store.ahybrid_search.call_args.kwargs
+    cat_filter = call_kwargs.get("filters")
+    assert cat_filter is not None
+    assert cat_filter.pagina == 124
+    assert cat_filter.edicion == "C10"
+    assert cat_filter.marca == "Yanbal"
 
 

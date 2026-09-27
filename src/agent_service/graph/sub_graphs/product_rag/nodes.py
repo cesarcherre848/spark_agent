@@ -3,7 +3,7 @@ from langchain_core.documents import Document
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, trim_messages
 
-from src.agent_service.core.stores.product.vector_store import ProductVectorStore
+from src.agent_service.core.stores.product.vector_store import ProductVectorStore, normalize_brand
 from src.agent_service.core.stores.product.schemas import ProductCatalogFilter
 from src.agent_service.graph.sub_graphs.product_rag.schemas import (
     NormalizedQuery,
@@ -53,6 +53,9 @@ class ProductRagNodes(BaseSynthesizerNode):
 
             Campos de salida:
                 1. 'search_query': Consulta normalizada, concisa y rica en palabras clave para búsqueda.
+                2. 'pagina': Número de página si el usuario la menciona explícitamente (ej. 'pág 12', 'página 124' -> 124).
+                3. 'edicion': Campaña o edición si se menciona (ej. 'C10', 'C-15' -> 'C10').
+                4. 'marca': Marca comercial si se menciona. Normaliza errores ortográficos o variantes coloquiales a la marca canónica oficial del catálogo (ej. 'essika', 'esika' -> 'Ésika'; 'yanbal' -> 'Yanbal').
         """
 
         user_prompt = f"""
@@ -72,15 +75,31 @@ class ProductRagNodes(BaseSynthesizerNode):
             else raw_query
         )
 
+        meta_filters = {}
+        if result:
+            if getattr(result, "pagina", None) is not None:
+                meta_filters["pagina"] = result.pagina
+            if getattr(result, "edicion", None):
+                meta_filters["edicion"] = result.edicion
+            if getattr(result, "marca", None):
+                meta_filters["marca"] = normalize_brand(result.marca)
+
         return {
             "refined_query": search_query,
+            "metadata_filters": meta_filters or None,
         }
 
     async def retrieve_products(self, state: ProductRagState) -> dict:
         query_text = (state.get("refined_query") or state.get("raw_query") or "").strip()
         user_id = state.get("user_id")
+        meta_filters = state.get("metadata_filters") or {}
 
-        catalog_filter = ProductCatalogFilter(user_id=user_id)
+        catalog_filter = ProductCatalogFilter(
+            user_id=user_id,
+            pagina=meta_filters.get("pagina"),
+            edicion=meta_filters.get("edicion"),
+            marca=meta_filters.get("marca"),
+        )
         docs = await self._vector_store.ahybrid_search(
             query=query_text,
             k=self._top_k,

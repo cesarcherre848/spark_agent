@@ -1,3 +1,4 @@
+import re
 from typing import Any, Dict, List, Optional
 from psycopg_pool import AsyncConnectionPool
 from langchain_core.documents import Document
@@ -7,17 +8,39 @@ from langchain_core.vectorstores import VectorStore
 from src.agent_service.core.stores.product.schemas import ProductCatalogFilter
 
 
+def normalize_brand(brand: Optional[str]) -> Optional[str]:
+    """Normaliza variantes comunes, acentos y errores ortográficos a las marcas canónicas del ERP."""
+    if not brand:
+        return None
+    b = brand.strip().lower()
+    if re.search(r"\b(es+ika|ésika)\b", b):
+        return "Ésika"
+    if re.search(r"\byanbal\b", b):
+        return "Yanbal"
+    if re.search(r"\b(belcorp|cyzone|l'?bel)\b", b):
+        return b.title()
+    return brand.strip()
+
+
 _HYBRID_QUERY_SQL = """
     WITH semantic_search AS (
         SELECT 
             emb.id,
             ROW_NUMBER() OVER (ORDER BY emb.{embedding_column} <=> %(query_embedding)s::vector) AS rank_sem
         FROM {table_name} emb
-        LEFT JOIN view_user_authorized_products vuap 
+        LEFT JOIN view_user_authorized_products_metadata vuap 
           ON vuap.product_id = emb.product_id 
-         AND vuap.user_id = %(user_id)s
+         AND (%(user_id)s::integer IS NULL OR vuap.user_id = %(user_id)s::integer)
         WHERE emb.active = TRUE
-          AND (%(user_id)s IS NULL OR vuap.user_id IS NOT NULL)
+          AND (%(user_id)s::integer IS NULL OR vuap.user_id IS NOT NULL)
+          AND (%(pagina)s::integer IS NULL OR vuap.pagina = %(pagina)s::integer)
+          AND (%(edicion)s::text IS NULL OR lower(vuap.edicion) = lower(%(edicion)s::text))
+          AND (
+              %(marca)s::text IS NULL 
+              OR lower(vuap.marca) = lower(%(marca)s::text)
+              OR position(translate(lower(%(marca)s::text), 'áéíóúÁÉÍÓÚ', 'aeiouaeiou') in translate(lower(vuap.marca), 'áéíóúÁÉÍÓÚ', 'aeiouaeiou')) > 0
+              OR (%(marca)s::text ~* '^es+ika' AND vuap.marca ~* '^es+ika|^ésika')
+          )
           AND emb.ai_provider = %(ai_provider)s
           AND emb.ai_model = %(ai_model)s
         ORDER BY emb.{embedding_column} <=> %(query_embedding)s::vector
@@ -33,11 +56,19 @@ _HYBRID_QUERY_SQL = """
                 ) DESC
             ) AS rank_lex
         FROM {table_name} emb
-        LEFT JOIN view_user_authorized_products vuap 
+        LEFT JOIN view_user_authorized_products_metadata vuap 
           ON vuap.product_id = emb.product_id 
-         AND vuap.user_id = %(user_id)s
+         AND (%(user_id)s::integer IS NULL OR vuap.user_id = %(user_id)s::integer)
         WHERE emb.active = TRUE
-          AND (%(user_id)s IS NULL OR vuap.user_id IS NOT NULL)
+          AND (%(user_id)s::integer IS NULL OR vuap.user_id IS NOT NULL)
+          AND (%(pagina)s::integer IS NULL OR vuap.pagina = %(pagina)s::integer)
+          AND (%(edicion)s::text IS NULL OR lower(vuap.edicion) = lower(%(edicion)s::text))
+          AND (
+              %(marca)s::text IS NULL 
+              OR lower(vuap.marca) = lower(%(marca)s::text)
+              OR position(translate(lower(%(marca)s::text), 'áéíóúÁÉÍÓÚ', 'aeiouaeiou') in translate(lower(vuap.marca), 'áéíóúÁÉÍÓÚ', 'aeiouaeiou')) > 0
+              OR (%(marca)s::text ~* '^es+ika' AND vuap.marca ~* '^es+ika|^ésika')
+          )
           AND emb.ai_provider = %(ai_provider)s
           AND emb.ai_model = %(ai_model)s
           AND to_tsvector('spanish', COALESCE(emb.name, '') || ' ' || COALESCE(emb.source_text, '')) 
@@ -53,14 +84,17 @@ _HYBRID_QUERY_SQL = """
             emb.source_text,
             vuap.vendor_id,
             vuap.sku,
+            vuap.pagina,
+            vuap.edicion,
+            vuap.marca,
             (
                 COALESCE(%(alpha)s / (60.0 + sem.rank_sem), 0.0) +
                 COALESCE((1.0 - %(alpha)s) / (60.0 + lex.rank_lex), 0.0)
             ) AS rrf_score
         FROM {table_name} emb
-        LEFT JOIN view_user_authorized_products vuap 
+        LEFT JOIN view_user_authorized_products_metadata vuap 
           ON vuap.product_id = emb.product_id 
-         AND vuap.user_id = %(user_id)s
+         AND (%(user_id)s::integer IS NULL OR vuap.user_id = %(user_id)s::integer)
         LEFT JOIN semantic_search sem ON sem.id = emb.id
         LEFT JOIN lexical_search lex ON lex.id = emb.id
         WHERE (sem.id IS NOT NULL OR lex.id IS NOT NULL)
@@ -76,7 +110,10 @@ _HYBRID_QUERY_SQL = """
         source_text,
         vendor_id,
         sku,
-        rrf_score
+        rrf_score,
+        pagina,
+        edicion,
+        marca
     FROM fused_candidates
     ORDER BY rrf_score DESC
     LIMIT %(k)s;
@@ -128,11 +165,30 @@ class ProductVectorStore(VectorStore):
             embedding_str = f"[{','.join(['0.0'] * self._embedding_dim)}]"
 
         target_user_id = filters.user_id if filters else None
+        target_pagina = (
+            filters.pagina
+            if (filters and filters.pagina is not None)
+            else (filters.metadata.pagina if (filters and filters.metadata) else None)
+        )
+        target_edicion = (
+            filters.edicion
+            if (filters and filters.edicion is not None)
+            else (filters.metadata.edicion if (filters and filters.metadata) else None)
+        )
+        raw_marca = (
+            filters.marca
+            if (filters and filters.marca is not None)
+            else (filters.metadata.marca if (filters and filters.metadata) else None)
+        )
+        target_marca = normalize_brand(raw_marca)
 
         params: Dict[str, Any] = {
             "query_embedding": embedding_str,
             "query_text": clean_query,
             "user_id": target_user_id,
+            "pagina": target_pagina,
+            "edicion": target_edicion,
+            "marca": target_marca,
             "alpha": alpha,
             "k_candidates": max(k * 4, 20),
             "k": k,
@@ -150,6 +206,9 @@ class ProductVectorStore(VectorStore):
 
         results: List[Document] = []
         for row in records:
+            pagina_val = row[8] if len(row) > 8 else None
+            edicion_val = row[9] if len(row) > 9 else None
+            marca_val = row[10] if len(row) > 10 else None
             results.append(
                 Document(
                     page_content=row[4] or row[3] or "",
@@ -161,6 +220,14 @@ class ProductVectorStore(VectorStore):
                         "vendor_id": row[5],
                         "sku": row[6],
                         "rrf_score": float(row[7]),
+                        "pagina": pagina_val,
+                        "edicion": edicion_val,
+                        "marca": marca_val,
+                        "tags": {
+                            "pagina": pagina_val,
+                            "edicion": edicion_val,
+                            "marca": marca_val,
+                        },
                     },
                 )
             )
