@@ -4,12 +4,14 @@ src/agent_service/graph/base_synthesizer.py - Clase base heredada para síntesis
 
 import re
 import logging
-from typing import Dict, Any, Optional, Literal, Union
+from typing import Dict, Any, Optional, Literal, Union, List
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage
+from langchain_core.documents import Document
 
 from src.agent_service.core.formatters.currency import format_currency, normalize_currencies_in_text
 from src.agent_service.core.templates.dialogs import WhitelabelSanitizer
+from src.agent_service.soul import inject_soul, SoulRole
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +83,119 @@ class BaseSynthesizerNode:
     def format_currency(cls, amount: Union[float, int, str, None], currency: Optional[str] = "PEN") -> str:
         """Formatea un monto numérico con la nomenclatura comercial oficial."""
         return format_currency(amount, currency=currency)
+
+    @classmethod
+    def format_products_context(cls, products: List[Any], max_desc_len: int = 250) -> str:
+        """Formatea de forma universal una lista de productos (Document o dict) en texto conciso para inyectar en prompts."""
+        if not products:
+            return "No se encontraron productos disponibles en el catálogo."
+
+        formatted_lines = []
+        for idx, item in enumerate(products, start=1):
+            if isinstance(item, Document):
+                meta = item.metadata or {}
+                desc = (item.page_content or "")[:max_desc_len].strip()
+                name = meta.get("name") or "Producto"
+                sku = meta.get("sku")
+                marca = meta.get("marca")
+                vendor_name = meta.get("vendor_name")
+                edicion = meta.get("edicion")
+                pagina = meta.get("pagina")
+                price = meta.get("price")
+                currency = meta.get("currency") or "PEN"
+            elif isinstance(item, dict):
+                desc = (item.get("description") or item.get("page_content") or "")[:max_desc_len].strip()
+                name = item.get("name") or "Producto"
+                sku = item.get("sku")
+                marca = item.get("marca")
+                vendor_name = item.get("vendor_name")
+                edicion = item.get("edicion")
+                pagina = item.get("pagina")
+                price = item.get("price")
+                currency = item.get("currency") or "PEN"
+            else:
+                continue
+
+            sku_tag = f" [SKU: {sku}]" if sku else ""
+            meta_tags = []
+            if marca:
+                meta_tags.append(f"Marca: {marca}")
+            if vendor_name and str(vendor_name).strip().lower() != str(marca or "").strip().lower():
+                meta_tags.append(f"Proveedor: {vendor_name}")
+            if edicion:
+                meta_tags.append(f"Campaña {edicion}")
+            if pagina is not None:
+                meta_tags.append(f"Pág. {pagina}")
+            if price is not None:
+                price_str = cls.format_currency(price, currency=currency)
+                meta_tags.append(f"Precio: {price_str}")
+
+            tags_str = f" [{ ' | '.join(meta_tags) }]" if meta_tags else ""
+            formatted_lines.append(f"[{idx}]{sku_tag} {name}{tags_str}\n    Detalle: {desc}")
+
+        return "\n\n".join(formatted_lines)
+
+    @classmethod
+    def build_synthesizer_system_prompt(
+        cls,
+        task_specific_rules: str,
+        role: Union[SoulRole, str] = SoulRole.RECOMMENDER,
+        state: Optional[Dict[str, Any]] = None,
+        include_multi_vendor: bool = True,
+        extra_context: Optional[str] = None,
+    ) -> str:
+        """Construye el System Prompt unificado del sintetizador obedeciendo al contrato de MIA (SOUL).
+
+        Garantiza que todos los subgrafos cumplan con:
+        1. Identidad, tono y estilo de MIA (SOUL).
+        2. Directrices de canal (WhatsApp vs Web).
+        3. Formato estándar de viñetas comerciales para productos:
+           * **[SKU] Nombre Comercial** (S/. XX.XX) - [Marca]: Beneficio o motivo de recomendación.
+        4. Continuidad conversacional (sin saludos redundantes si ya existe diálogo en curso).
+        5. Cumplimiento estricto de marca blanca (Whitelabel) y diferenciación multi-marca.
+        """
+        channel_instructions = cls.get_channel_prompt_instructions(state)
+
+        standard_product_rules = """
+ESTÁNDAR OBLIGATORIO DE PRESENTACIÓN DE PRODUCTOS:
+- Presenta de 1 a 4 opciones principales de manera clara y ordenada con viñetas limpias siguiendo esta estructura exacta:
+  * **[SKU] Nombre Comercial** (S/. XX.XX) - [Marca]: Breve beneficio o motivo de recomendación.
+- CÓDIGO SKU: Obligatorio si está disponible en los datos, siempre entre corchetes en negrita (ej: **[6189]**).
+- PRECIOS: Expresa siempre los montos en moneda nacional como 'S/.' (ej: 'S/. 35.00'). NUNCA inventes precios ni códigos SKU ausentes en los productos proporcionados.
+- Si el catálogo no cuenta con opciones exactas, sé cortés, transparente y ofrece la alternativa disponible más cercana.
+""".strip()
+
+        multi_vendor_rules = ""
+        if include_multi_vendor:
+            multi_vendor_rules = """
+GESTIÓN MULTI-PROVEEDOR / MULTI-MARCA Y WHITELABEL:
+- Si los productos recomendados provienen de distintas marcas comerciales (consulta abierta o comparativa), indica claramente la marca o casa comercial de cada opción (ej: [Ésika], [Yanbal], [Cyzone]) para que el cliente distinga y compare fácilmente.
+- Si todos los productos pertenecen a la misma marca ya solicitada por el usuario (consulta mono-marca), menciónala con naturalidad en el saludo o introducción y NO satures repitiéndola en cada viñeta.
+- 100% Whitelabel: NUNCA expongas identificadores internos, bases de datos ni términos de backend ('vendor_id', 'res_partner', 'partner_id', 'Odoo', 'PostgreSQL', 'view_user_authorized_products'). Utiliza siempre el nombre de la marca comercial de cara al cliente.
+""".strip()
+
+        conversational_rules = """
+CONTINUIDAD CONVERSACIONAL (MULTI-TURNO):
+- Si hay mensajes previos en la conversación, NO repitas saludos de bienvenida ("Hola", "Buen día", "¿En qué puedo ayudarte?"). Continúa fluidamente respondiendo directo a la consulta del usuario.
+""".strip()
+
+        combined_task_instructions = f"""
+{task_specific_rules.strip()}
+
+{standard_product_rules}
+
+{multi_vendor_rules}
+
+{conversational_rules}
+
+{channel_instructions}
+""".strip()
+
+        return inject_soul(
+            combined_task_instructions,
+            role=role,
+            extra_context=extra_context,
+        )
 
     @classmethod
     def post_process_response(cls, text: str, channel: str = "whatsapp") -> str:

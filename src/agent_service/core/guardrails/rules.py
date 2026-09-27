@@ -278,18 +278,18 @@ def evaluate_laya_scores(
         "harm_severity": round(score_harm, 4),
     }
 
-    # 0. Whitelist comercial: si la consulta está relacionada con la aplicación y el daño no es severo (< 2.0),
-    # es una operación comercial legítima (precios, pedidos, clientes). NUNCA bloquear por falsos positivos de jailbreak.
-    if p_out_of_scope <= 0.35 and score_harm < 2.0:
+    # 0. Whitelist comercial: si la consulta está relacionada con la aplicación, no hay sospecha de fuga de datos ni jailbreak y el daño no es severo (< 2.0),
+    # es una operación comercial legítima (precios, pedidos, clientes).
+    if p_out_of_scope <= 0.35 and score_harm < 2.0 and p_jailbreak < 0.85 and p_sensitive < 0.70:
         return (GuardrailAction.ALLOW, ViolationCategory.NONE, "Consulta comercial legítima evaluada por Laya.", None, None, scores_summary)
 
     # 1. Reglas de Bloqueo Crítico (BLOCK)
-    if p_jailbreak >= 0.90 and (p_sensitive >= 0.85 or score_harm >= 2.0) and p_out_of_scope > 0.35:
+    if p_jailbreak >= 0.90 and (p_sensitive >= 0.75 or score_harm >= 2.0 or p_out_of_scope > 0.35):
         cat = ViolationCategory.PROMPT_INJECTION
         reason = f"Intento de evasión o jailbreak detectado por Laya (probabilidad: {p_jailbreak:.2f})"
         return (GuardrailAction.BLOCK, cat, reason, None, format_guardrail_refusal(cat), scores_summary)
 
-    if p_sensitive >= 0.85 and (score_harm >= 2.0 or p_jailbreak >= 0.90) and p_out_of_scope > 0.35:
+    if p_sensitive >= 0.85:
         cat = ViolationCategory.SYSTEM_LEAK
         reason = f"Intento de extracción de datos confidenciales o credenciales detectado por Laya (probabilidad: {p_sensitive:.2f})"
         return (GuardrailAction.BLOCK, cat, reason, None, format_guardrail_refusal(cat), scores_summary)

@@ -5,6 +5,7 @@ tests/test_base_synthesizer.py - Pruebas unitarias para BaseSynthesizerNode, Cur
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 from langchain_core.messages import AIMessage
+from langchain_core.documents import Document
 
 from src.agent_service.core.formatters.currency import (
     CURRENCY_SYMBOLS,
@@ -13,11 +14,13 @@ from src.agent_service.core.formatters.currency import (
     normalize_currencies_in_text,
 )
 from src.agent_service.graph.base_synthesizer import BaseSynthesizerNode
+from src.agent_service.soul import SoulRole
 from src.agent_service.graph.sub_graphs.sales_manage.nodes import SalesManageNodes
 from src.agent_service.graph.sub_graphs.product_resolver.nodes import ProductResolverNodes
 from src.agent_service.graph.sub_graphs.product_recomender.nodes import ProductRecomenderNodes
 from src.agent_service.graph.sub_graphs.contact_manage.nodes import ContactManageNodes
 from src.agent_service.graph.sub_graphs.product_rag.nodes import ProductRagNodes
+from src.agent_service.graph.sub_graphs.product_advisor.nodes import ProductAdvisorNodes
 
 
 # ==============================================================================
@@ -139,6 +142,67 @@ def test_all_subgraph_nodes_inherit_from_base_synthesizer():
     assert issubclass(ProductRecomenderNodes, BaseSynthesizerNode)
     assert issubclass(ContactManageNodes, BaseSynthesizerNode)
     assert issubclass(ProductRagNodes, BaseSynthesizerNode)
+    assert issubclass(ProductAdvisorNodes, BaseSynthesizerNode)
+
+
+def test_base_synthesizer_build_system_prompt_contract():
+    prompt = BaseSynthesizerNode.build_synthesizer_system_prompt(
+        task_specific_rules="Presenta las mejores opciones de labiales.",
+        role=SoulRole.RECOMMENDER,
+        state={"channel": "whatsapp"},
+        include_multi_vendor=True,
+    )
+
+    # 1. Identidad de MIA y SOUL
+    assert "MIA" in prompt
+    assert "ESTÁNDAR OBLIGATORIO DE PRESENTACIÓN DE PRODUCTOS" in prompt
+    # 2. Formato estándar de viñetas con [SKU] y S/.
+    assert "**[SKU] Nombre Comercial**" in prompt
+    assert "S/." in prompt
+    # 3. Directrices de canal para WhatsApp
+    assert "DIRECTRICES OBLIGATORIAS DE FORMATO PARA WHATSAPP" in prompt
+    # 4. Continuidad multi-turno
+    assert "NO repitas saludos de bienvenida" in prompt
+    # 5. Whitelabel y multi-marca
+    assert "100% Whitelabel" in prompt
+    assert "[Ésika]" in prompt or "[Yanbal]" in prompt
+
+
+def test_base_synthesizer_format_products_context():
+    prods = [
+        Document(
+            page_content="Labial de larga duración acabado mate.",
+            metadata={
+                "name": "Hydra-Lip Líquido",
+                "sku": "761",
+                "marca": "Yanbal",
+                "edicion": "C10",
+                "pagina": 15,
+                "price": 45.0,
+                "currency": "PEN",
+            },
+        ),
+        {
+            "name": "Colorfix 24H",
+            "sku": "9812",
+            "marca": "Ésika",
+            "edicion": "C15",
+            "price": 32.5,
+            "description": "Labial indeleble a prueba de agua.",
+        },
+    ]
+
+    formatted = BaseSynthesizerNode.format_products_context(prods)
+    assert "[1] [SKU: 761] Hydra-Lip Líquido" in formatted
+    assert "Marca: Yanbal" in formatted
+    assert "Campaña C10" in formatted
+    assert "Pág. 15" in formatted
+    assert "Precio: S/. 45.00" in formatted
+
+    assert "[2] [SKU: 9812] Colorfix 24H" in formatted
+    assert "Marca: Ésika" in formatted
+    assert "Precio: S/. 32.50" in formatted
+
 
 
 @pytest.mark.asyncio

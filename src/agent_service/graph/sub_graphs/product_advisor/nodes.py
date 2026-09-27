@@ -12,6 +12,7 @@ from langchain_core.documents import Document
 
 from src.agent_service.core.llms import bind_temperature, bind_structured_output
 from src.agent_service.core.llms.factory import extract_clean_text
+from src.agent_service.soul import SoulRole
 from src.agent_service.graph.base_synthesizer import BaseSynthesizerNode
 from src.agent_service.core.stores.product.vector_store import ProductVectorStore
 from src.agent_service.core.stores.product.odoo_client import OdooClient
@@ -313,13 +314,12 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
         }
 
     async def synthesize_draft(self, state: ProductAdvisorState) -> Dict[str, Any]:
-        """Nodo 3: Sintetiza el borrador de respuesta comercial incorporando formato de canal y whitelabel."""
+        """Nodo 3: Sintetiza el borrador de respuesta comercial incorporando formato de canal y whitelabel obedeciendo al sintetizador padre."""
         raw_query = state.get("raw_query") or ""
         candidate_products = state.get("candidate_products") or []
         purchase_history = state.get("customer_purchase_history")
-        channel_instructions = BaseSynthesizerNode.get_channel_prompt_instructions(state)
 
-        products_context = format_products_for_advisor_prompt(candidate_products)
+        products_context = self.format_products_context(candidate_products)
 
         # Historial de diálogo previo para respuesta natural continua
         all_messages = state.get("messages", [])
@@ -343,34 +343,28 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
             Utiliza este contexto para dar una recomendación personalizada y cercana (ej: 'Basado en tus compras habituales...').
             """
 
-        system_prompt = f"""
-            Eres un asesor comercial experto y consultivo de belleza y catálogo.
-            Tu objetivo es brindar una recomendación o respuesta comercial impecable al cliente.
+        task_rules = """
+            Brinda una respuesta o recomendación comercial impecable, persuasiva y precisa para la consulta del cliente.
 
-            REGLAS ESTRICTAS:
-            1. Solo menciona productos, SKUs, precios y campañas que aparezcan en los PRODUCTOS DISPONIBLES.
-               NUNCA inventes precios ni códigos SKU.
-            2. Presenta de 1 a 4 opciones principales de manera clara con su precio (en moneda S/.),
-               marca, campaña o página si están disponibles, y una breve razón comercial de por qué se recomienda.
-            3. Si el catálogo no cuenta con opciones exactas, sé cortés, transparente y ofrece la alternativa más cercana.
-            4. Tono comercial: persuasivo, empático, sin jerga técnica ni mención de herramientas internas.
-            5. GESTIÓN MULTI-PROVEEDOR / MULTI-MARCA Y WHITELABEL:
-               - Si los productos recomendados provienen de distintos proveedores o marcas comerciales (consulta abierta o comparativa), indica claramente la marca o casa comercial de cada opción (ej: [Ésika], [Yanbal], [Cyzone]) para que el cliente distinga y compare fácilmente.
-               - Si todos los productos pertenecen a la misma marca/proveedor ya solicitada por el usuario (consulta mono-marca), menciónala con naturalidad en el saludo o introducción y NO satures repitiéndola en cada viñeta.
-               - 100% Whitelabel: NUNCA expongas identificadores internos, bases de datos ni términos de backend (como 'vendor_id', 'res_partner', 'partner_id', 'Odoo', 'PostgreSQL', 'view_user_authorized_products'). Utiliza siempre el nombre de la marca comercial de cara al cliente.
-            6. COHERENCIA CONVERSACIONAL:
-               - Mantén la continuidad natural con las respuestas y preguntas anteriores del diálogo sin reiniciar la conversación como si fueras un extraño.
-
-            {channel_instructions}
+            DIRECTRICES ESPECÍFICAS DE CATÁLOGO:
+            1. Solo menciona productos, SKUs, precios y campañas que aparezcan en los PRODUCTOS DISPONIBLES EN CATÁLOGO. NUNCA inventes precios ni códigos SKU.
+            2. Presenta de 1 a 4 opciones principales de manera clara y estructurada.
+            3. Invita con sutileza consultiva al cliente a cotizar o pedir alguno de los productos recomendados.
         """
+
+        system_prompt = self.build_synthesizer_system_prompt(
+            task_specific_rules=task_rules,
+            role=SoulRole.RECOMMENDER,
+            state=state,
+            include_multi_vendor=True,
+            extra_context=history_context.strip() if history_context else None,
+        )
 
         user_content = f"""
             Consulta del cliente: "{raw_query}"
 
             PRODUCTOS DISPONIBLES EN CATÁLOGO:
             {products_context}
-
-            {history_context}
         """
 
         messages = [
@@ -410,7 +404,7 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
         max_iterations = state.get("max_iterations", self._default_max_iterations)
         metadata_filters = state.get("metadata_filters") or {}
 
-        products_context = format_products_for_advisor_prompt(candidate_products)
+        products_context = self.format_products_context(candidate_products)
 
         # Extraer historial previo para evaluación justa de continuidad
         all_messages = state.get("messages", [])
@@ -434,7 +428,7 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
             1. relevance_score: ¿La respuesta atiende de forma directa, útil y completa la necesidad del usuario considerando el contexto del diálogo?
             2. grounding_score: ¿Los productos, precios y SKUs mencionados provienen estrictamente de los PRODUCTOS DISPONIBLES sin ninguna alucinación?
             3. constraints_score: ¿Se respetaron los filtros requeridos (marcas solicitadas, números de página, campañas, límites de presupuesto)?
-            4. presentation_score: ¿El tono es consultivo, claro, atractivo y adecuado para un chat comercial?
+            4. presentation_score: ¿Cumple con el estándar del sintetizador padre (formato de viñetas con **[SKU] Nombre**, precio en S/., tono consultivo sin jerga técnica y sin saludos redundantes si hay turnos previos)?
 
             REGLA DE APROBACIÓN (is_approved):
             - Para ser True: CADA uno de los 4 puntajes debe ser >= 7.0 Y el promedio general debe ser >= 8.0.

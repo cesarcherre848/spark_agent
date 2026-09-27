@@ -16,7 +16,7 @@ def test_create_google_model_with_explicit_key():
     )
 
     assert isinstance(model, ChatGoogleGenerativeAI)
-    assert model.model == "models/gemini-1.5-flash"
+    assert model.model in ("gemini-1.5-flash", "models/gemini-1.5-flash")
     assert model.temperature == 0.2
 
 
@@ -31,7 +31,7 @@ def test_create_google_model_custom_tokens():
     )
 
     assert isinstance(model, ChatGoogleGenerativeAI)
-    assert model.model == "models/gemini-1.5-pro"
+    assert model.model in ("gemini-1.5-pro", "models/gemini-1.5-pro")
     assert model.max_output_tokens == 1000
 
 

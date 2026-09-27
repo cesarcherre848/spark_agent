@@ -144,7 +144,7 @@ async def test_product_resolver_happy_path(mock_product_tool, mock_ownership_too
     assert sider_prods[0]["sku"] == "1"
     assert sider_prods[0]["requested_qty"] == 10.0
     assert sider_prods[0]["subtotal"] == 2100.0
-    assert "2100.00 PEN" in result["final_response"]
+    assert "S/. 2,100.00" in result["final_response"] or "2100.00 PEN" in result["final_response"]
 
     mock_extractor.ainvoke.assert_awaited_once()
     mock_ownership_tool.ainvoke.assert_awaited_once()

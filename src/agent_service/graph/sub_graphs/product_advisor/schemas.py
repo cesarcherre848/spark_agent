@@ -88,50 +88,8 @@ class QualityRubricEvaluation(BaseModel):
 
 
 def format_products_for_advisor_prompt(products: List[Any], max_desc_len: int = 250) -> str:
-    """Formatea una lista de productos (Document o dict) en texto conciso para inyectar en prompts."""
-    if not products:
-        return "No se encontraron productos disponibles."
+    """Formatea una lista de productos (Document o dict) en texto conciso para inyectar en prompts,
+    delegando en el sintetizador padre BaseSynthesizerNode."""
+    from src.agent_service.graph.base_synthesizer import BaseSynthesizerNode
+    return BaseSynthesizerNode.format_products_context(products, max_desc_len=max_desc_len)
 
-    formatted_lines = []
-    for idx, item in enumerate(products, start=1):
-        if isinstance(item, Document):
-            meta = item.metadata or {}
-            desc = (item.page_content or "")[:max_desc_len].strip()
-            name = meta.get("name") or "Producto"
-            sku = meta.get("sku")
-            marca = meta.get("marca")
-            vendor_name = meta.get("vendor_name")
-            edicion = meta.get("edicion")
-            pagina = meta.get("pagina")
-            price = meta.get("price")
-            currency = meta.get("currency") or "PEN"
-        elif isinstance(item, dict):
-            desc = (item.get("description") or item.get("page_content") or "")[:max_desc_len].strip()
-            name = item.get("name") or "Producto"
-            sku = item.get("sku")
-            marca = item.get("marca")
-            vendor_name = item.get("vendor_name")
-            edicion = item.get("edicion")
-            pagina = item.get("pagina")
-            price = item.get("price")
-            currency = item.get("currency") or "PEN"
-        else:
-            continue
-
-        sku_tag = f" [SKU: {sku}]" if sku else ""
-        meta_tags = []
-        if marca:
-            meta_tags.append(f"Marca: {marca}")
-        if vendor_name and str(vendor_name).strip().lower() != str(marca or "").strip().lower():
-            meta_tags.append(f"Proveedor: {vendor_name}")
-        if edicion:
-            meta_tags.append(f"Campaña {edicion}")
-        if pagina is not None:
-            meta_tags.append(f"Pág. {pagina}")
-        if price is not None:
-            meta_tags.append(f"Precio: {currency} {price}")
-
-        tags_str = f" [{ ' | '.join(meta_tags) }]" if meta_tags else ""
-        formatted_lines.append(f"[{idx}]{sku_tag} {name}{tags_str}\n    Detalle: {desc}")
-
-    return "\n\n".join(formatted_lines)
