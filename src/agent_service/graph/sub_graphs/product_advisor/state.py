@@ -48,6 +48,7 @@ class ProductAdvisorState(TypedDict, total=False):
     # Evaluación por Rúbrica y Reflexión
     meets_rubric: bool
     rubric_scores: Optional[Dict[str, float]]
+    reflection_action: Optional[str]
     critique: Optional[str]
     suggested_improvements: Optional[List[str]]
     iteration_count: int

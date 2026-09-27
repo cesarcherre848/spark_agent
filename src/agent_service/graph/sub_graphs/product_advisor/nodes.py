@@ -122,6 +122,11 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
               debe ser 'colonia hombre masculino eau de toilette fragancia fresca', NUNCA únicamente 'colonias').
               Ten presente que en el catálogo comercial, las fragancias masculinas ligeras suelen denominarse
               'Eau de Toilette' o 'Parfum', mientras que el término 'Colonia' aislado suele corresponder a líneas femeninas o infantiles.
+            - PREGUNTAS DE SEGUIMIENTO SOBRE PRODUCTOS PREVIOS ('esto a qué catálogo pertenece', '¿a qué campaña corresponde?', '¿cuánto cuesta ese?', '¿de qué marca son?', '¿tienen stock de esos?'):
+              Si la consulta hace referencia a los productos presentados en el turno inmediatamente anterior (usando palabras como 'esto', 'eso', 'aquello', 'estos', 'el primero', 'a qué catálogo pertenece', 'a qué campaña', 'de qué marca'):
+              1. NO ejecutes una búsqueda semántica genérica en catálogo (PROHIBIDO terminantemente planear query='catálogo campaña actual' o textos genéricos que mezclen otras marcas no relacionadas).
+              2. Identifica los códigos SKU o nombres de los productos recomendados en el turno anterior.
+              3. Invoca 'get_product_odoo_details' con dichos SKUs específicos para conocer sus detalles comerciales oficiales o preserva los productos del turno anterior.
 
             HERRAMIENTAS DISPONIBLES:
             1. 'search_product_catalog': Búsqueda semántica híbrida en el catálogo. Argumentos:
@@ -209,14 +214,30 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
                     if isinstance(m, HumanMessage) and m.content:
                         fallback_query = f"{m.content} {raw_query}"
                         break
-            # Ajuste proactivo de limit en fallback si es exhaustivo o con precio
+            # Detección heurística de consulta de seguimiento anafórica sobre turnos previos
             f_lower = raw_query.lower()
-            fallback_limit = 15 if any(w in f_lower for w in ["todo", "todos", "barato", "menos de", "hasta", "presupuesto", "precio", "rango"]) else 8
-            planned_tools = [{
-                "tool_name": "search_product_catalog",
-                "arguments": {"query": fallback_query, "limit": fallback_limit, "user_id": user_id or 5},
-                "purpose": "Búsqueda estándar de catálogo.",
-            }]
+            prev_skus = []
+            if trimmed_history:
+                for m in reversed(trimmed_history):
+                    if isinstance(m, AIMessage) and m.content:
+                        found_skus = re.findall(r"\[([A-Za-z0-9_-]+)\]", m.content)
+                        if found_skus:
+                            prev_skus = found_skus
+                            break
+            is_followup = any(w in f_lower for w in ["esto", "eso", "esos", "catalogo", "catálogo", "campaña", "marca", "pertenece", "cuesta", "precio"])
+            if is_followup and prev_skus:
+                planned_tools = [{
+                    "tool_name": "get_product_odoo_details",
+                    "arguments": {"skus": prev_skus[:10]},
+                    "purpose": "Consultar detalles oficiales y catálogo de los productos del turno previo.",
+                }]
+            else:
+                fallback_limit = 15 if any(w in f_lower for w in ["todo", "todos", "barato", "menos de", "hasta", "presupuesto", "precio", "rango"]) else 8
+                planned_tools = [{
+                    "tool_name": "search_product_catalog",
+                    "arguments": {"query": fallback_query, "limit": fallback_limit, "user_id": user_id or 5},
+                    "purpose": "Búsqueda estándar de catálogo.",
+                }]
             extracted_meta = {}
 
         return {
@@ -340,8 +361,11 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
                 if isinstance(res, dict) and "products" in res:
                     details_list = res.get("products", [])
                     details_by_sku = {d.get("sku"): d for d in details_list if isinstance(d, dict)}
+                    existing_skus = set()
                     for p in candidate_products:
                         s = p.get("sku")
+                        if s:
+                            existing_skus.add(s)
                         if s and s in details_by_sku:
                             det = details_by_sku[s]
                             p["price"] = det.get("price")
@@ -349,6 +373,28 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
                             p["uom"] = det.get("uom")
                             if det.get("sales_description"):
                                 p["sales_description"] = det.get("sales_description")
+                            if det.get("name") and not p.get("name"):
+                                p["name"] = det.get("name")
+                            if det.get("marca") and not p.get("marca"):
+                                p["marca"] = det.get("marca")
+                            if det.get("edicion") and not p.get("edicion"):
+                                p["edicion"] = det.get("edicion")
+                            if det.get("pagina") and not p.get("pagina"):
+                                p["pagina"] = det.get("pagina")
+                    for det in details_list:
+                        if isinstance(det, dict) and det.get("sku") and det["sku"] not in existing_skus:
+                            candidate_products.append({
+                                "sku": det["sku"],
+                                "name": det.get("name") or f"Producto {det['sku']}",
+                                "price": det.get("price"),
+                                "currency": det.get("currency", "PEN"),
+                                "uom": det.get("uom"),
+                                "description": det.get("sales_description") or det.get("description", ""),
+                                "marca": det.get("marca"),
+                                "edicion": det.get("edicion"),
+                                "pagina": det.get("pagina"),
+                            })
+                            existing_skus.add(det["sku"])
 
         # Enriquecimiento reactivo de precios si los candidatos carecen de precio
         skus_needing_price = [
@@ -435,11 +481,37 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
             5. CONSISTENCIA DE PÚBLICO OBJETIVO Y GÉNERO:
                Si la consulta actual o el contexto del diálogo previo determina un público objetivo (ej: masculino/hombre vs femenino/mujer vs infantil/niños), verifica rigurosamente que los productos recomendados correspondan a dicho público.
                NUNCA recomiendes fragancias o colonias marcadamente femeninas si el cliente busca para hombre (o viceversa). Si los candidatos recuperados en la búsqueda pertenecen al género opuesto o no deseado, DESCÁRTALOS de tu respuesta.
-               Si no existen colonias estrictamente masculinas bajo el presupuesto pedido, acláralo amablemente y presenta alternativas masculinas disponibles (ej: Eau de Toilette masculinos o colonias corporales unisex), pero jamás sugieras líneas femeninas o de niñas.
+                Si no existen colonias estrictamente masculinas bajo el presupuesto pedido, acláralo amablemente y presenta alternativas masculinas disponibles (ej: Eau de Toilette masculinos o colonias corporales unisex), pero jamás sugieras líneas femeninas o de niñas.
             6. MANEJO DE PRESUPUESTO Y RANGOS DE PRECIO:
                Si el cliente especificó un rango o tope de presupuesto (ej: "menos de 50 soles", "hasta 60", "barato") y los productos disponibles en catálogo superan ligeramente dicho monto (indicado con budget_exceeded=True o precios mayores), NUNCA digas simplemente "no tenemos nada" ni devuelvas una lista vacía.
                Actúa como un asesor consultivo experto: explica amablemente que actualmente las opciones disponibles inician desde [precio mínimo disponible] y presenta con entusiasmo las alternativas masculinas o afines más accesibles y cercanas del catálogo para que el cliente pueda decidir.
+            7. CLARIDAD Y NO AMBIGÜEDAD EN CONSULTAS DE SEGUIMIENTO:
+               Si la consulta del cliente indaga sobre recomendaciones previas ("esto a qué catálogo pertenece", "¿a qué campaña corresponde?", "¿cuánto cuesta ese?", "¿de qué marca es?"):
+               - Identifica de forma precisa a qué producto(s) y SKU(s) específicos se refiere la pregunta.
+               - Explica con total claridad su marca comercial y la campaña o edición a la que pertenece.
+               - PROHIBIDO TERMINANTEMENTE emitir respuestas ambiguas que mezclen marcas que no corresponden a los productos reales recomendados previamente (ej: si los productos eran de Yanbal, jamás menciones Ésika ni otras marcas no involucradas).
         """
+
+        critique = state.get("critique")
+        remedy_suggestions = state.get("suggested_improvements") or []
+        previous_draft = state.get("draft_response")
+
+        reflection_feedback = ""
+        if critique:
+            reflection_feedback = f"""
+
+            ATENCIÓN - RETROALIMENTACIÓN DE REFLEXIÓN (CLARIDAD Y NO AMBIGÜEDAD):
+            El borrador anterior fue RECHAZADO por la Rúbrica de Calidad:
+            Crítica: "{critique}"
+            Sugerencias de mejora: {remedy_suggestions}
+
+            INSTRUCCIONES DE CORRECCIÓN:
+            1. Corrige directamente la redacción para ser 100% específico, transparente e inequívoco.
+            2. Si la consulta se refiere a recomendaciones previas (ej: 'esto a qué catálogo pertenece'), menciona con precisión los productos/SKUs del turno anterior y asócialos exactamente a su marca y catálogo real.
+            3. Prohibido estrictamente generalizar o mezclar marcas que no corresponden a los productos reales.
+            """
+            if previous_draft:
+                reflection_feedback += f"\n            BORRADOR ANTERIOR A REFINAR:\n            {previous_draft}\n"
 
         system_prompt = self.build_synthesizer_system_prompt(
             task_specific_rules=task_rules,
@@ -454,6 +526,7 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
 
             PRODUCTOS DISPONIBLES EN CATÁLOGO:
             {products_context}
+            {reflection_feedback}
         """
 
         messages = [
@@ -518,10 +591,18 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
             2. grounding_score: ¿Los productos, precios y SKUs mencionados provienen estrictamente de los PRODUCTOS DISPONIBLES sin ninguna alucinación?
             3. constraints_score: ¿Se respetaron los filtros y restricciones del diálogo (público objetivo / género hombre/mujer/niños, marcas solicitadas sin mezclar marcas no deseadas, números de página, campañas, límites de presupuesto)? Si el diálogo solicita productos masculinos/hombre y se recomiendan artículos femeninos o infantiles, califica constraints_score con < 5.0 y desaprueba (is_approved = False) con crítica explícita. Si el usuario fijó un presupuesto ajustado y el catálogo solo tiene opciones de precio ligeramente mayor, califica POSITIVAMENTE (>= 8.0) si el asesor explicó con cortesía el rango de precios disponible y presentó las opciones más cercanas en lugar de dejar al cliente sin respuesta.
             4. presentation_score: ¿Cumple con el estándar del sintetizador padre (agrupación limpia por marcas cuando hay 2 o más marcas distintas, formato de viñetas con [SKU] Nombre, precio en S/., tono consultivo sin jerga técnica y sin saludos redundantes si hay turnos previos)? OBLIGATORIO: Si el texto contiene viñetas de productos pegadas o concatenadas en el mismo párrafo sin saltos de línea (\n), califica presentation_score < 6.0, marca is_approved = False y exige en remedy_suggestions: 'Separar cada producto en un renglón independiente con salto de línea (\n)'.
+            5. clarity_and_unambiguity_score: ¿La respuesta es 100% clara, directa e inequívoca? En preguntas de seguimiento o referencia de turnos previos ('esto a qué catálogo pertenece', '¿cuánto cuesta ese?', '¿de qué marca son?'):
+               - Debe identificar con exactitud de qué productos se habla y atribuir con veracidad quirúrgica su marca y catálogo/campaña real.
+               - PROHIBIDO APROBAR si la respuesta agrupa o menciona marcas que no corresponden a los productos reales recomendados (ej: decir 'pertenecen a nuestras campañas de Ésika y Yanbal' cuando los productos discutidos eran solo de Yanbal). Califica clarity_and_unambiguity_score < 6.0, marca is_approved = False y fija reflection_action = 'refine_synthesis'.
+
+            ACCIÓN DE REFLEXIÓN (reflection_action):
+            - 'approve': Si todos los 5 criterios son >= 7.0 y el promedio es >= 8.0.
+            - 'refine_synthesis': Si is_approved es False pero los productos candidatos en catálogo son válidos y la falla radica en redacción ambigua, mezcla de marcas, falta de claridad o formato.
+            - 'replan_tools': Si is_approved es False y faltan productos en catálogo o la búsqueda trajo artículos completamente ajenos a la intención.
 
             REGLA DE APROBACIÓN (is_approved):
-            - Para ser True: CADA uno de los 4 puntajes debe ser >= 7.0 Y el promedio general debe ser >= 8.0.
-            - Si no cumple, marca is_approved = False y detalla 'critique' y 'remedy_suggestions'.
+            - Para ser True: CADA uno de los 5 puntajes debe ser >= 7.0 Y el promedio general debe ser >= 8.0.
+            - Si no cumple, marca is_approved = False y detalla 'critique', 'remedy_suggestions' y 'reflection_action'.
         """
 
         user_content = f"""
@@ -548,22 +629,33 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
             is_approved = evaluation.is_approved
             critique = evaluation.critique
             remedy = evaluation.remedy_suggestions
+            refl_action = getattr(evaluation, "reflection_action", None)
+            if is_approved:
+                refl_action = "approve"
+            elif not refl_action or refl_action == "approve":
+                if evaluation.constraints_score < 7.0 or evaluation.relevance_score < 7.0 or not candidate_products:
+                    refl_action = "replan_tools"
+                else:
+                    refl_action = "refine_synthesis"
             scores = {
                 "relevance": evaluation.relevance_score,
                 "grounding": evaluation.grounding_score,
                 "constraints": evaluation.constraints_score,
                 "presentation": evaluation.presentation_score,
+                "clarity_and_unambiguity": getattr(evaluation, "clarity_and_unambiguity_score", 8.0),
             }
         except Exception as e:
             logger.warning(f"Error evaluando rúbrica con LLM: {e}. Aprobando por seguridad de avance.")
             is_approved = True
             critique = None
             remedy = []
+            refl_action = "approve"
             scores = {"average": 8.0}
 
         return {
             "meets_rubric": is_approved,
             "rubric_scores": scores,
+            "reflection_action": refl_action,
             "critique": critique,
             "suggested_improvements": remedy,
             "iteration_count": iteration_count,
@@ -588,5 +680,6 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
                 "iteration_count": 0,
                 "critique": None,
                 "suggested_improvements": [],
+                "reflection_action": "approve",
             },
         )

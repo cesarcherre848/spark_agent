@@ -202,12 +202,24 @@ CONTINUIDAD CONVERSACIONAL (MULTI-TURNO):
 - Si hay mensajes previos en la conversación, NO repitas saludos de bienvenida ("Hola", "Buen día", "¿En qué puedo ayudarte?"). Continúa fluidamente respondiendo directo a la consulta del usuario.
 """.strip()
 
+        clarity_and_unambiguity_rules = """
+CLARIDAD Y NO AMBIGÜEDAD (COMUNICACIÓN PRECISA Y CONSULTIVA):
+- PRECISIÓN EN CONSULTAS DE SEGUIMIENTO Y REFERENCIAS RELATIVAS ('esto', 'esos', '¿a qué catálogo pertenece?'):
+  Si el usuario pregunta sobre productos o recomendaciones previas del diálogo:
+  1. Identifica inequívocamente a qué productos específicos se refiere la consulta (mencionando su nombre comercial y SKU).
+  2. NUNCA respondas con generalidades ambiguas ni mezcles marcas que no corresponden (PROHIBIDO terminantemente decir 'pertenecen a nuestras campañas de [Marca A] y [Marca B]' si los productos recomendados corresponden únicamente a [Marca A] o a [Marca B]).
+  3. Detalla con exactitud quirúrgica la marca y edición/campaña del catálogo a la que pertenece cada producto o el conjunto discutido.
+- ATRIBUCIÓN TRANSPARENTE: Toda mención de campañas, páginas de catálogo o precios debe ser veraz, inequívoca y sustentada en los datos disponibles.
+""".strip()
+
         combined_task_instructions = f"""
 {task_specific_rules.strip()}
 
 {standard_product_rules}
 
 {multi_vendor_rules}
+
+{clarity_and_unambiguity_rules}
 
 {conversational_rules}
 

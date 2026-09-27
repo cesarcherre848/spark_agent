@@ -27,17 +27,20 @@ logger = logging.getLogger(__name__)
 
 def _route_after_rubric(
     state: ProductAdvisorState,
-) -> Literal["finalize_response", "plan_and_select_tools"]:
+) -> Literal["finalize_response", "synthesize_draft", "plan_and_select_tools"]:
     """Enrutador condicional tras la evaluación por rúbrica:
     - Si cumple la rúbrica -> finalize_response
     - Si iteration_count >= max_iterations (default 3) -> finalize_response (corte forzoso)
-    - Si no cumple e iteration_count < max_iterations -> plan_and_select_tools (reintento con feedback)
+    - Si no cumple e iteration_count < max_iterations:
+      * Si reflection_action == "refine_synthesis" -> synthesize_draft (Fast Reflection Loop: corrige ambigüedad directamente)
+      * En otro caso -> plan_and_select_tools (Slow Reflection Loop: re-planifica herramientas por insuficiencia de datos)
     """
     meets_rubric = state.get("meets_rubric", False)
     iteration_count = state.get("iteration_count", 0)
     max_iterations = state.get("max_iterations", 3)
+    reflection_action = state.get("reflection_action", "replan_tools")
 
-    if meets_rubric:
+    if meets_rubric or reflection_action == "approve":
         logger.info(
             f"product_advisor: Rúbrica APROBADA (iteración {iteration_count}). Avanzando a finalización."
         )
@@ -50,9 +53,16 @@ def _route_after_rubric(
         )
         return "finalize_response"
 
+    if reflection_action == "refine_synthesis":
+        logger.info(
+            f"product_advisor: Rúbrica RECHAZADA por claridad/ambigüedad (iteración {iteration_count}/{max_iterations}). "
+            "Ejecutando Fast Reflection Loop hacia 'synthesize_draft' para refinar redacción sin re-ejecutar herramientas."
+        )
+        return "synthesize_draft"
+
     logger.info(
-        f"product_advisor: Rúbrica RECHAZADA (iteración {iteration_count}/{max_iterations}). "
-        "Re-planificando con feedback correctivo de rúbrica."
+        f"product_advisor: Rúbrica RECHAZADA por datos insuficientes (iteración {iteration_count}/{max_iterations}). "
+        "Re-planificando con herramientas en 'plan_and_select_tools'."
     )
     return "plan_and_select_tools"
 
@@ -94,6 +104,7 @@ def build_product_advisor_graph(
         _route_after_rubric,
         {
             "finalize_response": "finalize_response",
+            "synthesize_draft": "synthesize_draft",
             "plan_and_select_tools": "plan_and_select_tools",
         },
     )

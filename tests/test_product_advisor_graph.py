@@ -60,12 +60,16 @@ def test_advisor_plan_and_rubric_schemas():
         grounding_score=9.5,
         constraints_score=8.5,
         presentation_score=9.0,
+        clarity_and_unambiguity_score=9.5,
+        reflection_action="approve",
         is_approved=True,
         critique=None,
         remedy_suggestions=[],
     )
     assert rubric.is_approved is True
     assert rubric.relevance_score == 9.0
+    assert rubric.clarity_and_unambiguity_score == 9.5
+    assert rubric.reflection_action == "approve"
 
 
 def test_filter_and_sort_products_tool():
@@ -361,6 +365,8 @@ async def test_advisor_graph_reflection_loop_rejection_then_approval():
         grounding_score=7.0,
         constraints_score=6.0,
         presentation_score=7.0,
+        clarity_and_unambiguity_score=6.0,
+        reflection_action="replan_tools",
         is_approved=False,
         critique="La respuesta no especificó el tono ni la campaña.",
         remedy_suggestions=["Incluir detalles de edición"],
@@ -370,6 +376,8 @@ async def test_advisor_graph_reflection_loop_rejection_then_approval():
         grounding_score=9.0,
         constraints_score=9.0,
         presentation_score=9.0,
+        clarity_and_unambiguity_score=9.5,
+        reflection_action="approve",
         is_approved=True,
     )
 
@@ -405,6 +413,113 @@ async def test_advisor_graph_reflection_loop_rejection_then_approval():
     assert state["meets_rubric"] is True
     assert state["iteration_count"] == 2
     assert _route_after_rubric(state) == "finalize_response"
+
+
+@pytest.mark.asyncio
+async def test_advisor_graph_fast_reflection_loop_synthesis_clarity():
+    """Verifica el Fast Reflection Loop: si la falla es de ambigüedad/claridad,
+    enruta directamente a 'synthesize_draft' sin re-ejecutar herramientas de base de datos."""
+    mock_llm = MagicMock(spec=BaseChatModel)
+
+    nodes = ProductAdvisorNodes(
+        llm=mock_llm,
+        tools_registry={
+            "search_product_catalog": AsyncMock(return_value=[
+                {"sku": "208", "name": "Temptation Hombre", "price": 192.0, "marca": "Yanbal", "edicion": "C10"}
+            ]),
+        },
+        default_max_iterations=3,
+    )
+
+    nodes._planner = AsyncMock()
+    nodes._planner.ainvoke.return_value = AdvisorPlan(
+        reasoning="Consulta de catálogo",
+        strategy="direct_search",
+        tool_calls=[],
+    )
+
+    # El juez rechaza por ambigüedad en el borrador con refine_synthesis
+    ambiguous_rubric = QualityRubricEvaluation(
+        relevance_score=8.0,
+        grounding_score=8.0,
+        constraints_score=8.0,
+        presentation_score=7.0,
+        clarity_and_unambiguity_score=5.0,
+        reflection_action="refine_synthesis",
+        is_approved=False,
+        critique="La respuesta menciona erróneamente Ésika cuando el producto es exclusivamente de Yanbal.",
+        remedy_suggestions=["Aclarar que [208] Temptation pertenece al catálogo Yanbal"],
+    )
+    clear_rubric = QualityRubricEvaluation(
+        relevance_score=9.5,
+        grounding_score=9.5,
+        constraints_score=9.5,
+        presentation_score=9.0,
+        clarity_and_unambiguity_score=9.5,
+        reflection_action="approve",
+        is_approved=True,
+    )
+
+    nodes._rubric_judge = AsyncMock()
+    nodes._rubric_judge.ainvoke.side_effect = [ambiguous_rubric, clear_rubric]
+
+    nodes._synthesizer = AsyncMock()
+    nodes._synthesizer.ainvoke.side_effect = [
+        FinalAnswer(response_text="Pertenecen a Ésika y Yanbal"),
+        FinalAnswer(response_text="El producto *[208] Temptation* pertenece al catálogo de Yanbal (Campaña C10)."),
+    ]
+
+    state: ProductAdvisorState = {
+        "raw_query": "esto a que catalogo pertenece",
+        "candidate_products": [{"sku": "208", "name": "Temptation Hombre", "price": 192.0, "marca": "Yanbal", "edicion": "C10"}],
+        "iteration_count": 0,
+        "max_iterations": 3,
+    }
+
+    # Iteración 1: Evaluación del borrador ambiguo
+    state.update(await nodes.synthesize_draft(state))
+    state.update(await nodes.rubric_evaluator_judge(state))
+
+    assert state["meets_rubric"] is False
+    assert state["reflection_action"] == "refine_synthesis"
+    # Fast Loop enruta directamente a synthesize_draft sin llamar a herramientas
+    assert _route_after_rubric(state) == "synthesize_draft"
+
+    # Iteración 2: Síntesis refinada con feedback de claridad
+    state.update(await nodes.synthesize_draft(state))
+    state.update(await nodes.rubric_evaluator_judge(state))
+
+    assert state["meets_rubric"] is True
+    assert _route_after_rubric(state) == "finalize_response"
+
+
+@pytest.mark.asyncio
+async def test_anaphoric_followup_resolves_previous_skus():
+    """Verifica que consultas de seguimiento como 'esto a que catalogo pertenece'
+    detecten los SKUs previos y planeen 'get_product_odoo_details' sin búsqueda ciega."""
+    mock_llm = MagicMock(spec=BaseChatModel)
+    nodes = ProductAdvisorNodes(llm=mock_llm, default_max_iterations=3)
+
+    # Forzar fallback heurístico
+    nodes._planner.ainvoke = AsyncMock(side_effect=Exception("LLM unavailable"))
+
+    state: ProductAdvisorState = {
+        "raw_query": "esto a que catalogo pertenece",
+        "messages": [
+            HumanMessage(content="recomiendame perfumes"),
+            AIMessage(content="Aquí tienes: *[208] Temptation* (S/. 192.00) y *[206] Dendur* (S/. 192.00)."),
+            HumanMessage(content="esto a que catalogo pertenece"),
+        ],
+        "iteration_count": 0,
+    }
+
+    plan_result = await nodes.plan_and_select_tools(state)
+    planned_tools = plan_result.get("planned_tools", [])
+
+    assert len(planned_tools) == 1
+    assert planned_tools[0]["tool_name"] == "get_product_odoo_details"
+    assert "208" in planned_tools[0]["arguments"]["skus"]
+    assert "206" in planned_tools[0]["arguments"]["skus"]
 
 
 @pytest.mark.asyncio

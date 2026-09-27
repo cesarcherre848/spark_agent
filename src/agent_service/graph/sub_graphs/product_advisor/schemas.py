@@ -73,9 +73,19 @@ class QualityRubricEvaluation(BaseModel):
         le=10.0,
         description="Puntaje de 1 a 10: ¿El tono es comercial, conciso y adecuado al canal (WhatsApp / Web)?",
     )
+    clarity_and_unambiguity_score: float = Field(
+        default=8.0,
+        ge=1.0,
+        le=10.0,
+        description="Puntaje de 1 a 10: ¿La respuesta es 100% clara, sin afirmaciones ambiguas ni mezcla errónea de marcas/campañas ante referencias de seguimiento ('esto a qué catálogo pertenece')?",
+    )
     is_approved: bool = Field(
         ...,
         description="True si todos los criterios son >= 7.0 y el promedio es >= 8.0.",
+    )
+    reflection_action: Literal["approve", "refine_synthesis", "replan_tools"] = Field(
+        default="approve",
+        description="Acción de reflexión: 'approve' si pasa; 'refine_synthesis' si los datos son válidos pero la redacción es ambigua o imprecisa; 'replan_tools' si faltan datos de catálogo.",
     )
     critique: Optional[str] = Field(
         default=None,
