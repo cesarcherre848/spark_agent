@@ -174,8 +174,8 @@ class MainGraphState(TypedDict, total=False):
 # ==============================================================================
 class RouterDecision(BaseModel):
     """Clasificación estructurada de la consulta comercial."""
-    intent: Literal["rag", "resolver", "general", "contact", "sales", "recommender", "out_of_scope"] = Field(
-        description="Intención comercial detectada: 'rag', 'recommender', 'resolver', 'contact', 'sales', 'general' u 'out_of_scope'."
+    intent: Literal["advisor", "resolver", "general", "contact", "sales", "out_of_scope", "rag", "recommender"] = Field(
+        description="Intención comercial detectada: 'advisor', 'resolver', 'contact', 'sales', 'general' u 'out_of_scope'."
     )
     reasoning: str = Field(description="Breve justificación de la decisión.")
 
@@ -340,18 +340,17 @@ def create_router_node(llm: BaseChatModel):
         )
 
         system_prompt = """
-            Clasifica la consulta del usuario en exactamente una de estas 7 intenciones comerciales:
-            1. 'recommender': Recomendación, sugerencia, ranking, presupuesto o selección de productos:
-               - Peticiones con superlativos de precio o rankings (ej: 'los más baratos', 'más económicos', 'más caros', 'mejores opciones', 'los 3 mejores').
-               - Peticiones de recomendación o sugerencia general o por categoría (ej: 'recomiéndame cremas', 'qué me recomiendas para la piel', 'me podrías decir 3 cremas hidratantes').
-               - Recomendaciones relacionales (cross-selling, up-selling o sustitutos: ej: 'qué combina con X', 'alternativas a Y').
-            2. 'rag': Consultas puramente informativas, técnicas o de existencia de catálogo SIN pedir ranking, recomendación ni comparación de precios:
-               - Preguntas sobre ingredientes, ficha técnica, modo de uso o existencia puntual (ej: '¿tienen protector solar?', '¿qué componentes tiene la crema Bio Milk?', '¿tienen labiales mate disponibles?').
-            3. 'resolver': Cotización directa o precios/stock con códigos SKU numéricos específicos (ej: 'precio del SKU 1', 'cotiza 3 del SKU 5').
-            4. 'contact': Gestión de cartera de clientes comerciales (ej: 'mis clientes', 'agregar cliente Carlos').
-            5. 'sales': Gestión de pedidos, órdenes y cotizaciones comerciales (ej: 'mis pedidos', 'confirmar orden SO001', 'detalle del pedido de Janet', 'cómo van las órdenes de Carlos', 'cotizar a cliente').
-            6. 'general': Saludos de cortesía, despedidas o preguntas sobre qué servicios puedes brindar.
-            7. 'out_of_scope': Solicitud ajena al negocio (poemas, chistes, código/programación, tareas escolares, ciencias, consejos personales).
+            Clasifica la consulta del usuario en exactamente una de estas 6 intenciones comerciales:
+            1. 'advisor': Asesoría y catálogo comercial de productos (búsquedas, recomendaciones, sugerencias, rankings, existencias, ingredientes o presupuestos):
+               - Búsqueda o existencia de productos (ej: 'dame todos los perfumes para hombre de Yanbal', '¿tienen labiales mate?', 'muéstrame opciones de cremas').
+               - Recomendaciones o sugerencias generales o por categoría (ej: 'qué me recomiendas para la piel', 'los 3 mejores perfumes', 'opciones más baratas', 'me podrías decir 3 cremas').
+               - Preguntas informativas de catálogo (ej: 'ingredientes de crema Bio Milk', 'componentes de fragancia Ohm').
+               - Recomendaciones relacionales (cross-selling, up-selling o sustitutos).
+            2. 'resolver': Cotización directa o precios/stock con códigos SKU numéricos específicos (ej: 'precio del SKU 1', 'cotiza 3 del SKU 5').
+            3. 'contact': Gestión de cartera de clientes comerciales (ej: 'mis clientes', 'agregar cliente Carlos').
+            4. 'sales': Gestión de pedidos, órdenes y cotizaciones comerciales (ej: 'mis pedidos', 'confirmar orden SO001', 'detalle del pedido de Janet', 'cómo van las órdenes de Carlos', 'cotizar a cliente').
+            5. 'general': Saludos de cortesía, despedidas o preguntas sobre qué servicios puedes brindar.
+            6. 'out_of_scope': Solicitud ajena al negocio (poemas, chistes, código/programación, tareas escolares, ciencias, consejos personales).
         """
 
         context_block = f"\nAntecedentes de memoria:\n{user_context}\n" if user_context else ""
@@ -478,7 +477,9 @@ def _route_after_router(state: MainGraphState) -> Literal[
         if state.get("is_warning"):
             return "general_chat"
         return "guardrail_blocked"
-    elif intent in ("rag", "advisor", "product_advisor"):
+    elif intent in ("advisor", "product_advisor"):
+        return "product_advisor"
+    elif intent == "rag":
         return "product_rag"
     elif intent == "recommender":
         return "product_recomender"

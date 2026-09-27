@@ -116,6 +116,25 @@ async def test_create_router_node_rag(mock_llm):
 
 
 @pytest.mark.asyncio
+async def test_create_router_node_advisor(mock_llm):
+    mock_llm.ainvoke.return_value = RouterDecision(
+        intent="advisor",
+        reasoning="El cliente busca recomendaciones y opciones de catálogo",
+    )
+    router_fn = create_router_node(mock_llm)
+
+    state = {
+        "raw_query": "dame todos los perfumes de hombre de Yanbal",
+        "messages": [HumanMessage(content="dame todos los perfumes de hombre de Yanbal")],
+        "user_id": 5,
+    }
+
+    result = await router_fn(state)
+    assert result["intent"] == "advisor"
+    assert result["raw_query"] == "dame todos los perfumes de hombre de Yanbal"
+
+
+@pytest.mark.asyncio
 async def test_create_router_node_resolver(mock_llm):
     mock_llm.ainvoke.return_value = RouterDecision(
         intent="resolver",
@@ -520,4 +539,55 @@ async def test_main_graph_routes_to_sales_manage(mock_memory_store):
 
     assert result["intent"] == "sales"
     assert "Tienes 2 cotizaciones activas" in result["final_response"]
+
+
+@pytest.mark.asyncio
+async def test_main_graph_routes_to_product_advisor(mock_memory_store):
+    """Verifica que el Router derive directamente a product_advisor cuando la intención es 'advisor'."""
+    router_mock = MagicMock(spec=BaseChatModel)
+    router_mock.with_structured_output = MagicMock(
+        return_value=AsyncMock(
+            ainvoke=AsyncMock(
+                return_value=RouterDecision(
+                    intent="advisor",
+                    reasoning="El usuario solicita perfumes de Yanbal",
+                )
+            )
+        )
+    )
+
+    builder_advisor = StateGraph(MainGraphState)
+    builder_advisor.add_node(
+        "advisor_exec",
+        lambda s: {
+            "final_response": "Aquí tienes los perfumes de Yanbal disponibles.",
+            "matched_skus": ["2203"],
+        },
+    )
+    builder_advisor.add_edge(START, "advisor_exec")
+    builder_advisor.add_edge("advisor_exec", END)
+    dummy_advisor = builder_advisor.compile()
+
+    combined_llm = MagicMock(spec=BaseChatModel)
+    combined_llm.bind = MagicMock(side_effect=lambda **kw: router_mock)
+
+    app = build_main_graph(
+        llm=combined_llm,
+        advisor_graph=dummy_advisor,
+        memory_store=mock_memory_store,
+        checkpointer=MemorySaver(),
+    )
+
+    config = {"configurable": {"thread_id": "thread-advisor-routing"}}
+    result = await app.ainvoke(
+        {
+            "raw_query": "dame todos los perfumes para hombre de yanbal",
+            "user_id": 5,
+            "messages": [HumanMessage(content="dame todos los perfumes para hombre de yanbal")],
+        },
+        config=config,
+    )
+
+    assert result["intent"] == "advisor"
+    assert "Aquí tienes los perfumes de Yanbal" in result["final_response"]
 
