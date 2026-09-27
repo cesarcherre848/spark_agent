@@ -33,6 +33,7 @@ _HYBRID_QUERY_SQL = """
          AND (%(user_id)s::integer IS NULL OR vuap.user_id = %(user_id)s::integer)
         WHERE emb.active = TRUE
           AND (%(user_id)s::integer IS NULL OR vuap.user_id IS NOT NULL)
+          AND (%(vendor_id)s::integer IS NULL OR vuap.vendor_id = %(vendor_id)s::integer)
           AND (%(pagina)s::integer IS NULL OR vuap.pagina = %(pagina)s::integer)
           AND (%(edicion)s::text IS NULL OR lower(vuap.edicion) = lower(%(edicion)s::text))
           AND (
@@ -61,6 +62,7 @@ _HYBRID_QUERY_SQL = """
          AND (%(user_id)s::integer IS NULL OR vuap.user_id = %(user_id)s::integer)
         WHERE emb.active = TRUE
           AND (%(user_id)s::integer IS NULL OR vuap.user_id IS NOT NULL)
+          AND (%(vendor_id)s::integer IS NULL OR vuap.vendor_id = %(vendor_id)s::integer)
           AND (%(pagina)s::integer IS NULL OR vuap.pagina = %(pagina)s::integer)
           AND (%(edicion)s::text IS NULL OR lower(vuap.edicion) = lower(%(edicion)s::text))
           AND (
@@ -87,6 +89,7 @@ _HYBRID_QUERY_SQL = """
             vuap.pagina,
             vuap.edicion,
             vuap.marca,
+            rp.name AS vendor_name,
             (
                 COALESCE(%(alpha)s / (60.0 + sem.rank_sem), 0.0) +
                 COALESCE((1.0 - %(alpha)s) / (60.0 + lex.rank_lex), 0.0)
@@ -95,6 +98,7 @@ _HYBRID_QUERY_SQL = """
         LEFT JOIN view_user_authorized_products_metadata vuap 
           ON vuap.product_id = emb.product_id 
          AND (%(user_id)s::integer IS NULL OR vuap.user_id = %(user_id)s::integer)
+        LEFT JOIN res_partner rp ON rp.id = vuap.vendor_id
         LEFT JOIN semantic_search sem ON sem.id = emb.id
         LEFT JOIN lexical_search lex ON lex.id = emb.id
         WHERE (sem.id IS NOT NULL OR lex.id IS NOT NULL)
@@ -113,7 +117,8 @@ _HYBRID_QUERY_SQL = """
         rrf_score,
         pagina,
         edicion,
-        marca
+        marca,
+        vendor_name
     FROM fused_candidates
     ORDER BY rrf_score DESC
     LIMIT %(k)s;
@@ -181,11 +186,13 @@ class ProductVectorStore(VectorStore):
             else (filters.metadata.marca if (filters and filters.metadata) else None)
         )
         target_marca = normalize_brand(raw_marca)
+        target_vendor_id = filters.vendor_id if (filters and filters.vendor_id is not None) else None
 
         params: Dict[str, Any] = {
             "query_embedding": embedding_str,
             "query_text": clean_query,
             "user_id": target_user_id,
+            "vendor_id": target_vendor_id,
             "pagina": target_pagina,
             "edicion": target_edicion,
             "marca": target_marca,
@@ -209,6 +216,7 @@ class ProductVectorStore(VectorStore):
             pagina_val = row[8] if len(row) > 8 else None
             edicion_val = row[9] if len(row) > 9 else None
             marca_val = row[10] if len(row) > 10 else None
+            vendor_name_val = row[11] if len(row) > 11 else None
             results.append(
                 Document(
                     page_content=row[4] or row[3] or "",
@@ -218,6 +226,7 @@ class ProductVectorStore(VectorStore):
                         "product_tmpl_id": row[2],
                         "name": row[3],
                         "vendor_id": row[5],
+                        "vendor_name": vendor_name_val,
                         "sku": row[6],
                         "rrf_score": float(row[7]),
                         "pagina": pagina_val,
@@ -227,6 +236,8 @@ class ProductVectorStore(VectorStore):
                             "pagina": pagina_val,
                             "edicion": edicion_val,
                             "marca": marca_val,
+                            "vendor_id": row[5],
+                            "vendor_name": vendor_name_val,
                         },
                     },
                 )

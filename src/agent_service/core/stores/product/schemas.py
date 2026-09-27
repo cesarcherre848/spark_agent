@@ -1,4 +1,4 @@
-from typing import List, Optional, Literal, Dict
+from typing import List, Optional, Literal, Dict, Any
 from pydantic import BaseModel, Field
 
 
@@ -37,6 +37,14 @@ class ProductCatalogFilter(BaseModel):
     marca: Optional[str] = Field(
         default=None,
         description="Filtro directo por marca comercial (ej: 'Yanbal', 'Ésika').",
+    )
+    vendor_id: Optional[int] = Field(
+        default=None,
+        description="Filtro directo por ID de proveedor en res_partner.",
+    )
+    vendor_name: Optional[str] = Field(
+        default=None,
+        description="Filtro directo por nombre del proveedor (ej: 'Unique S.A.', 'CETCO S.A.').",
     )
     metadata: Optional[ProductMetadataFilter] = Field(
         default=None,
@@ -160,4 +168,117 @@ class ValidateProductOwnershipOutput(BaseModel):
         default_factory=dict,
         description="Resultados de validación indexados por código SKU.",
     )
+
+
+# --- Esquemas para el Asesor Unificado de Productos (Planner Tools) ---
+
+class SearchProductCatalogInput(BaseModel):
+    query: str = Field(
+        description="Términos clave de búsqueda en el catálogo de productos (ej: 'labial mate', 'perfume floral')."
+    )
+    marca: Optional[str] = Field(
+        default=None,
+        description="Marca comercial específica requerida (ej: 'Yanbal', 'Ésika').",
+    )
+    pagina: Optional[int] = Field(
+        default=None,
+        description="Número de página del catálogo físico si se solicita explícitamente.",
+    )
+    edicion: Optional[str] = Field(
+        default=None,
+        description="Campaña o edición de catálogo (ej: 'C10').",
+    )
+    limit: Optional[int] = Field(
+        default=8,
+        description="Cantidad máxima de candidatos a recuperar.",
+    )
+    user_id: Optional[int] = Field(
+        default=None,
+        description="ID del vendedor CRM para validar catálogo autorizado.",
+    )
+    vendor_id: Optional[int] = Field(
+        default=None,
+        description="Filtro opcional por ID de proveedor oficial en Odoo (res.partner).",
+    )
+    vendor_name: Optional[str] = Field(
+        default=None,
+        description="Filtro opcional por nombre del proveedor (ej: 'Unique S.A.', 'CETCO S.A.').",
+    )
+
+
+class GetCrossSellRecommendationsInput(BaseModel):
+    base_sku: Optional[str] = Field(
+        default=None,
+        description="SKU de referencia a partir del cual buscar productos complementarios o sustitutos.",
+    )
+    category: Optional[str] = Field(
+        default=None,
+        description="Categoría base del producto (ej: 'Labiales', 'Perfumería').",
+    )
+    marca: Optional[str] = Field(
+        default=None,
+        description="Marca preferida para las sugerencias cruzadas.",
+    )
+    limit: Optional[int] = Field(
+        default=5,
+        description="Cantidad máxima de recomendaciones a generar.",
+    )
+    user_id: Optional[int] = Field(
+        default=None,
+        description="ID del vendedor CRM.",
+    )
+
+
+class FilterAndSortProductsInput(BaseModel):
+    products: List[Dict[str, Any]] = Field(
+        description="Lista de productos en formato diccionario para filtrar y ordenar.",
+    )
+    min_price: Optional[float] = Field(
+        default=None,
+        description="Precio mínimo permitido.",
+    )
+    max_price: Optional[float] = Field(
+        default=None,
+        description="Presupuesto o precio máximo permitido.",
+    )
+    marca: Optional[str] = Field(
+        default=None,
+        description="Filtro estricto por marca comercial.",
+    )
+    vendor_name: Optional[str] = Field(
+        default=None,
+        description="Filtro estricto por nombre del proveedor o casa comercial.",
+    )
+    pagina: Optional[int] = Field(
+        default=None,
+        description="Filtro estricto por número de página del catálogo.",
+    )
+    edicion: Optional[str] = Field(
+        default=None,
+        description="Filtro estricto por campaña o edición de catálogo.",
+    )
+    sort_by: Optional[Literal["price_asc", "price_desc", "relevance"]] = Field(
+        default=None,
+        description="Criterio de orden: 'price_asc' (menor a mayor), 'price_desc' (mayor a menor) o 'relevance'.",
+    )
+
+
+class CustomerPurchaseHistoryInput(BaseModel):
+    partner_id: Optional[int] = Field(
+        default=None,
+        description="ID del cliente en Odoo ERP (res.partner).",
+    )
+    customer_name: Optional[str] = Field(
+        default=None,
+        description="Nombre o razón social del cliente para buscar sus pedidos.",
+    )
+    user_id: Optional[int] = Field(
+        default=None,
+        description="ID del vendedor asignado al cliente.",
+    )
+    limit: Optional[int] = Field(
+        default=5,
+        description="Número máximo de pedidos previos a analizar.",
+    )
+
 

@@ -50,6 +50,10 @@ from src.agent_service.graph.sub_graphs.product_recomender.graph import (
     build_product_recomender_graph,
     get_product_recomender_graph,
 )
+from src.agent_service.graph.sub_graphs.product_advisor.graph import (
+    build_product_advisor_graph,
+    get_product_advisor_graph,
+)
 
 from src.agent_service.soul import inject_soul, SoulRole
 from src.agent_service.core.guardrails import (
@@ -107,11 +111,14 @@ class MainGraphState(TypedDict, total=False):
     saved_memory_id: Optional[int]
     clarification_count: int
 
-    # Pasamanos de product_rag:
+    # Pasamanos de product_rag y product_advisor:
     refined_query: Optional[str]
     retrieved_products: List[Any]
     is_sufficient: bool
     matched_skus: List[str]
+    customer_purchase_history: Optional[Dict[str, Any]]
+    plan_rationale: Optional[str]
+    planned_tools: Optional[List[Dict[str, Any]]]
 
     # Pasamanos de contact_manage:
     contact_action: Optional[Literal["list", "upsert", "remove"]]
@@ -411,6 +418,7 @@ def _route_after_router(state: MainGraphState) -> Literal[
     "contact_manage",
     "sales_manage",
     "product_recomender",
+    "product_advisor",
     "guardrail_blocked",
 ]:
     """Enrutamiento condicional según la intención detectada."""
@@ -419,7 +427,7 @@ def _route_after_router(state: MainGraphState) -> Literal[
         if state.get("is_warning"):
             return "general_chat"
         return "guardrail_blocked"
-    elif intent == "rag":
+    elif intent in ("rag", "advisor", "product_advisor"):
         return "product_rag"
     elif intent == "recommender":
         return "product_recomender"
@@ -439,6 +447,7 @@ def build_main_graph(
     contact_graph: Optional[Any] = None,
     sales_graph: Optional[Any] = None,
     recommender_graph: Optional[Any] = None,
+    advisor_graph: Optional[Any] = None,
     memory_store: Optional[UserMemoryStore] = None,
     checkpointer: Optional[BaseCheckpointSaver] = None,
 ):
@@ -468,10 +477,14 @@ def build_main_graph(
 
     # 3. Subgrafos compilados
     compiled_resolver = resolver_graph if resolver_graph is not None else get_product_resolver_graph()
-    compiled_rag = rag_graph if rag_graph is not None else get_product_rag_graph()
+    compiled_advisor = (
+        advisor_graph if advisor_graph is not None
+        else get_product_advisor_graph()
+    )
+    compiled_rag = rag_graph if rag_graph is not None else compiled_advisor
     compiled_contact = contact_graph if contact_graph is not None else get_contact_manage_graph()
     compiled_sales = sales_graph if sales_graph is not None else get_sales_manage_graph()
-    compiled_recommender = recommender_graph if recommender_graph is not None else get_product_recomender_graph()
+    compiled_recommender = recommender_graph if recommender_graph is not None else compiled_advisor
 
     # Registro de nodos en el grafo
     workflow.add_node("input_guardrail", input_guardrail)
@@ -479,6 +492,7 @@ def build_main_graph(
     workflow.add_node("retrieve_memory", retrieve_memory_wrapper)
     workflow.add_node("router", router_node)
     workflow.add_node("general_chat", general_node)
+    workflow.add_node("product_advisor", compiled_advisor)
     workflow.add_node("product_rag", compiled_rag)
     workflow.add_node("product_recomender", compiled_recommender)
     workflow.add_node("product_resolver", compiled_resolver)
@@ -509,6 +523,7 @@ def build_main_graph(
             "general_chat": "general_chat",
             "product_rag": "product_rag",
             "product_recomender": "product_recomender",
+            "product_advisor": "product_advisor",
             "product_resolver": "product_resolver",
             "contact_manage": "contact_manage",
             "sales_manage": "sales_manage",
@@ -519,6 +534,7 @@ def build_main_graph(
     # Rutas hacia el fin
     workflow.add_edge("guardrail_blocked", END)
     workflow.add_edge("general_chat", END)
+    workflow.add_edge("product_advisor", END)
     workflow.add_edge("product_rag", END)
     workflow.add_edge("product_recomender", END)
     workflow.add_edge("product_resolver", "save_memory")
