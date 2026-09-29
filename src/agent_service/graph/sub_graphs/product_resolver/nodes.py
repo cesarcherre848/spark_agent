@@ -69,7 +69,7 @@ class ProductResolverNodes(BaseSynthesizerNode):
         # Recortar historial para que el extractor entienda referencias contextuales (ej. '¿qué precio tienen?')
         trimmed_history = trim_messages(
             state.get("messages", []),
-            max_tokens=10,
+            max_tokens=15,
             strategy="last",
             token_counter=len,
         )
@@ -397,7 +397,7 @@ class ProductResolverNodes(BaseSynthesizerNode):
 
         trimmed_history = trim_messages(
             state.get("messages", []),
-            max_tokens=10,
+            max_tokens=15,
             strategy="last",
             token_counter=len,
         )

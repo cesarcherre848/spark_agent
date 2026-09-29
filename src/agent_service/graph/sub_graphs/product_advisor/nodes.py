@@ -97,7 +97,7 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
         )
         trimmed_history = trim_messages(
             history_pool,
-            max_tokens=6,
+            max_tokens=15,
             strategy="last",
             token_counter=len,
         )
@@ -457,7 +457,7 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
         )
         trimmed_history = trim_messages(
             history_pool,
-            max_tokens=6,
+            max_tokens=15,
             strategy="last",
             token_counter=len,
         )
@@ -577,7 +577,7 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
         )
         trimmed_history = trim_messages(
             history_pool,
-            max_tokens=6,
+            max_tokens=15,
             strategy="last",
             token_counter=len,
         )

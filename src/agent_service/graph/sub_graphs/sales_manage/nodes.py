@@ -8,6 +8,7 @@ preservación estricta de contexto multi-turno y compatibilidad con guardrails H
 
 import inspect
 import logging
+import re
 from typing import Dict, Any, List, Optional, Callable, Awaitable, Union, Literal
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.tools import BaseTool
@@ -162,10 +163,10 @@ class SalesManageNodes(BaseSynthesizerNode):
             remedy_suggestions = state.get("suggested_improvements") or []
 
         user_id = int(state.get("user_id") or 5)
-        active_customer = state.get("customer_name")
-        active_partner_id = state.get("partner_id")
-        active_order = state.get("target_order_name")
-        active_order_id = state.get("target_order_id")
+        active_customer = state.get("active_customer") or state.get("customer_name")
+        active_partner_id = state.get("active_partner_id") or state.get("partner_id")
+        active_order = state.get("active_order") or state.get("target_order_name")
+        active_order_id = state.get("active_order_id") or state.get("target_order_id")
         user_context = state.get("user_context") or ""
 
         # Historial de diálogo reciente
@@ -177,7 +178,7 @@ class SalesManageNodes(BaseSynthesizerNode):
         )
         trimmed_history = trim_messages(
             history_pool,
-            max_tokens=8,
+            max_tokens=15,
             strategy="last",
             token_counter=len,
         )
@@ -470,6 +471,22 @@ class SalesManageNodes(BaseSynthesizerNode):
                 sales_act = "view"
             elif strat == "create_quotation":
                 sales_act = "upsert"
+                if target_customer and not resolved_partner_id:
+                    try:
+                        custs = await self._list_customers_tool(name=target_customer, user_id=user_id)
+                        if custs and len(custs) == 1:
+                            resolved_partner_id = custs[0].get("id")
+                            target_customer = custs[0].get("name")
+                        elif custs and len(custs) > 1:
+                            req_hitl_val = True
+                            hitl_type_val = "ambiguous_customer"
+                            candidate_partners = custs
+                    except Exception:
+                        pass
+                elif not target_customer:
+                    req_hitl_val = True
+                    hitl_type_val = "ambiguous_customer"
+                    hitl_q_val = "¿A qué cliente de tu cartera deseas asociar esta cotización?"
             elif strat in ("update_quotation", "add_items"):
                 sales_act = "add_items"
             elif strat == "confirm_order":
@@ -487,6 +504,14 @@ class SalesManageNodes(BaseSynthesizerNode):
             hitl_type_val = getattr(plan, "hitl_type", None)
             hitl_q_val = getattr(plan, "hitl_question", None)
             extracted_items = []
+
+        for tc in tool_calls_dict:
+            if tc.get("tool_name") == "odoo_create_quotation":
+                args = tc.setdefault("arguments", {})
+                if target_customer and not args.get("customer_name"):
+                    args["customer_name"] = target_customer
+                if resolved_partner_id and not args.get("partner_id"):
+                    args["partner_id"] = resolved_partner_id
 
         if target_order:
             target_order = normalize_order_name(target_order)
@@ -643,12 +668,22 @@ class SalesManageNodes(BaseSynthesizerNode):
                     upd_order = upd_call.get("arguments", {}).get("order_name") or state.get("target_order_name")
                     if upd_order:
                         output["target_order_name"] = upd_order
-                elif operation_result.get("name") and not output.get("target_order_name"):
-                    output["target_order_name"] = operation_result.get("name")
-                if operation_result.get("order_id"):
-                    output["target_order_id"] = operation_result.get("order_id")
         if partner_id is not None:
             output["partner_id"] = partner_id
+            output["active_partner_id"] = partner_id
+        elif isinstance(operation_result, dict) and operation_result.get("partner_id"):
+            output["partner_id"] = operation_result.get("partner_id")
+            output["active_partner_id"] = operation_result.get("partner_id")
+
+        cust_val = output.get("customer_name") or state.get("customer_name")
+        if cust_val:
+            output["active_customer"] = cust_val
+            output["customer_name"] = cust_val
+
+        ord_val = output.get("target_order_name") or state.get("target_order_name")
+        if ord_val:
+            output["active_order"] = ord_val
+            output["target_order_name"] = ord_val
 
         return output
 
@@ -665,7 +700,7 @@ class SalesManageNodes(BaseSynthesizerNode):
         raw_query = state.get("raw_query") or ""
         trimmed_history = trim_messages(
             state.get("messages", []),
-            max_tokens=8,
+            max_tokens=15,
             strategy="last",
             token_counter=len,
         )
@@ -884,7 +919,25 @@ class SalesManageNodes(BaseSynthesizerNode):
             asks_for_products = any(k in raw_lower for k in ("detalle", "producto", "lista", "items", "línea", "incluye"))
             mentions_products_in_draft = any(k in draft_response.lower() for k in ("1x", "2x", "3x", "unidades", "s/.", "total:"))
 
-            if asks_for_products and not mentions_products_in_draft and orders_list:
+            all_msgs_text = " ".join(getattr(m, "content", "") for m in state.get("messages", [])[-15:])
+            says_no_orders = any(k in draft_response.lower() for k in ("no registra ninguna orden", "no cuenta con cotizaciones", "todo se encuentra en blanco", "no existen registros"))
+            has_recent_order = any(k in all_msgs_text for k in ("ha quedado confirmada con éxito", "creado la cotización S000", "orden S000", "cotización S000"))
+            cust_name_val = state.get("customer_name") or ""
+
+            if says_no_orders and has_recent_order and cust_name_val and cust_name_val.lower() in all_msgs_text.lower():
+                found_orders = re.findall(r"S\d{5}", all_msgs_text)
+                target_ord = found_orders[-1] if found_orders else ""
+                evaluation = SalesQualityRubricEvaluation(
+                    relevance_score=5.0,
+                    grounding_score=5.0,
+                    detail_completeness_score=5.0,
+                    whitelabel_and_safety_score=9.0,
+                    is_approved=False,
+                    reflection_action="replan_tools",
+                    critique=f"El diálogo reciente muestra la existencia de la orden {target_ord} para {cust_name_val}, pero se informó que no tiene pedidos.",
+                    remedy_suggestions=[f"Consultar directamente la orden {target_ord} con odoo_view_quotation."],
+                )
+            elif asks_for_products and not mentions_products_in_draft and orders_list:
                 evaluation = SalesQualityRubricEvaluation(
                     relevance_score=6.0,
                     grounding_score=8.5,
@@ -932,13 +985,18 @@ class SalesManageNodes(BaseSynthesizerNode):
         """Nodo 5: Aplica formateo nativo para WhatsApp, estandarización de divisas (PEN) y emite la respuesta final."""
         text = state.get("draft_response") or state.get("final_response") or ""
         
+        extra = {
+            "critique": None,
+            "suggested_improvements": None,
+        }
+        for k in ("active_customer", "active_partner_id", "active_order", "active_order_id", "customer_name", "partner_id", "target_order_name"):
+            if state.get(k) is not None:
+                extra[k] = state.get(k)
+
         formatted_output = BaseSynthesizerNode.format_final_response(
             text,
             state,
-            extra={
-                "critique": None,
-                "suggested_improvements": None,
-            },
+            extra=extra,
         )
         return formatted_output
 
@@ -984,11 +1042,15 @@ class SalesManageNodes(BaseSynthesizerNode):
         if config:
             var_child_runnable_config.set(config)
         candidates = state.get("candidate_partners", [])
-        options = [
-            f"{c['name']} (Tel: {c.get('phone') or 'Sin teléfono'})"
-            for c in candidates
-        ]
-        question = f"Encontré varios clientes coincidentes en tu cartera: {'; '.join(options)}. ¿A cuál de ellos te refieres?"
+        if candidates:
+            options = [
+                f"{c['name']} (Tel: {c.get('phone') or 'Sin teléfono'})"
+                for c in candidates
+            ]
+            question = f"Encontré varios clientes coincidentes en tu cartera: {'; '.join(options)}. ¿A cuál de ellos te refieres?"
+        else:
+            options = ["Registrar como nuevo cliente"]
+            question = "¿A qué cliente de tu cartera deseas asociar esta cotización? (indica su nombre si es nuevo)."
 
         user_resume = interrupt({
             "type": "ambiguous_customer_conflict",
@@ -1035,12 +1097,66 @@ class SalesManageNodes(BaseSynthesizerNode):
             return {
                 "partner_id": partner_id,
                 "customer_name": cust_name,
+                "active_partner_id": partner_id,
+                "active_customer": cust_name,
                 "customer_resolved": True,
                 "customer_not_found": False,
                 "requires_hitl": has_dup,
                 "hitl_type": "duplicate" if has_dup else None,
                 "has_possible_duplicates": has_dup,
                 "current_candidates": cand_orders,
+                "planned_tools": [t.model_dump() for t in tools],
+            }
+        elif selection.action == "new":
+            new_name = selection.selected_entity_name or state.get("customer_name")
+            if not new_name and user_resume:
+                clean_text = str(user_resume)
+                for prefix in ("es uno nuevo", "ella se llama", "se llama", "nuevo cliente", "nueva clienta", "nuevo", "nueva"):
+                    if prefix in clean_text.lower():
+                        idx = clean_text.lower().find(prefix) + len(prefix)
+                        clean_text = clean_text[idx:]
+                new_name = clean_text.strip(" \n:.,")
+            if not new_name:
+                new_name = "Cliente Nuevo"
+
+            new_partner_id = None
+            try:
+                upsert_res = await self._upsert_customer_tool(
+                    name=new_name,
+                    user_id=user_id,
+                )
+                if isinstance(upsert_res, dict):
+                    new_partner_id = upsert_res.get("id")
+            except Exception as e:
+                logger.warning(f"Error registrando nuevo cliente '{new_name}': {e}")
+
+            items = state.get("items", [])
+            if not items and state.get("planned_tools"):
+                for pt in state["planned_tools"]:
+                    if pt.get("tool_name") == "odoo_create_quotation" and pt.get("arguments", {}).get("items"):
+                        items = pt["arguments"]["items"]
+                        break
+
+            tools = [PlannedSalesTool(
+                tool_name="odoo_create_quotation",
+                arguments={
+                    "customer_name": new_name,
+                    "partner_id": new_partner_id,
+                    "items": items,
+                },
+                purpose=f"Crear cotización para nuevo cliente {new_name}",
+            )]
+
+            return {
+                "partner_id": new_partner_id,
+                "customer_name": new_name,
+                "active_partner_id": new_partner_id,
+                "active_customer": new_name,
+                "customer_resolved": True,
+                "customer_not_found": False,
+                "requires_hitl": False,
+                "hitl_type": None,
+                "has_possible_duplicates": False,
                 "planned_tools": [t.model_dump() for t in tools],
             }
 

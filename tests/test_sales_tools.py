@@ -1,5 +1,5 @@
 import pytest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 from httpx import Response
 
 from src.agent_service.core.stores.product.odoo_client import OdooClient
@@ -584,6 +584,62 @@ async def test_odoo_atomic_quotation_tools(mock_odoo_client):
     write_call = mock_odoo_client._client.post.call_args_list[2]
     order_line_cmds = write_call.kwargs["json"]["params"]["args"][1]["order_line"]
     assert (1, 5, {"product_uom_qty": 2.0}) in order_line_cmds
+
+
+@pytest.mark.asyncio
+async def test_odoo_create_quotation_auto_resolves_customer_name(mock_odoo_client):
+    """Valida que odoo_create_quotation resuelva automáticamente el cliente por customer_name
+    en lugar de requerir o hacer fallback silencioso a partner_id=1.
+    """
+    resp_create = MagicMock(spec=Response)
+    resp_create.json.return_value = {"result": 99}
+
+    resp_view = MagicMock(spec=Response)
+    resp_view.json.return_value = {
+        "result": [{
+            "id": 99,
+            "name": "S00010",
+            "amount_total": 200.0,
+            "amount_untaxed": 200.0,
+            "amount_tax": 0.0,
+            "order_line": [],
+            "partner_id": [20, "Carmen Saavedra"],
+        }]
+    }
+    mock_odoo_client._client.post.side_effect = [resp_create, resp_view]
+
+    with patch("src.agent_service.tools.contact_tools.odoo_list_current_customers", new_callable=AsyncMock) as mock_list_cust:
+        mock_list_cust.return_value = [{"id": 20, "name": "Carmen Saavedra"}]
+
+        res = await odoo_create_quotation(
+            user_id=7,
+            customer_name="Carmen Saavedra",
+            items=[{"product_id": 11, "qty": 1.0, "price_unit": 200.0}],
+            client=mock_odoo_client,
+        )
+
+        assert res["success"] is True
+        assert res["name"] == "S00010"
+        assert res["partner_id"] == 20
+        create_call = mock_odoo_client._client.post.call_args_list[0]
+        create_vals = create_call.kwargs["json"]["params"]["args"][0]
+        assert create_vals["partner_id"] == 20
+        assert create_vals["user_id"] == 7
+
+
+@pytest.mark.asyncio
+async def test_odoo_create_quotation_fails_without_partner_or_customer(mock_odoo_client):
+    """Valida que odoo_create_quotation falle limpiamente sin asignar a partner 1 si no hay cliente."""
+    res = await odoo_create_quotation(
+        user_id=7,
+        partner_id=None,
+        customer_name=None,
+        items=[{"product_id": 11, "qty": 1.0}],
+        client=mock_odoo_client,
+    )
+    assert res["success"] is False
+    assert "No se identificó" in res["error"]
+
 
 
 

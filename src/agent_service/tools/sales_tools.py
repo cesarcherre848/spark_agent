@@ -336,8 +336,9 @@ async def odoo_list_current_sales_orders(
 
 
 async def odoo_create_quotation(
-    user_id: int = 5,
-    partner_id: int = 1,
+    user_id: Optional[int] = None,
+    partner_id: Optional[int] = None,
+    customer_name: Optional[str] = None,
     items: Optional[List[Dict[str, Any]]] = None,
     client: Optional[OdooClient] = None,
 ) -> Dict[str, Any]:
@@ -345,6 +346,31 @@ async def odoo_create_quotation(
     c = get_shared_odoo_client(client)
     if not getattr(c, "_uid", None):
         await c.authenticate()
+
+    resolved_user_id = int(user_id or 5)
+
+    # Resolución dinámica de cliente si no se suministró partner_id numérico explícito
+    if not partner_id and customer_name:
+        from src.agent_service.tools.contact_tools import (
+            odoo_list_current_customers,
+            odoo_upsert_customer,
+        )
+        clean_cust = str(customer_name).strip()
+        try:
+            found_custs = await odoo_list_current_customers(user_id=resolved_user_id, name=clean_cust, client=c)
+            if found_custs:
+                partner_id = found_custs[0].get("id")
+            else:
+                upsert_res = await odoo_upsert_customer(user_id=resolved_user_id, name=clean_cust, client=c)
+                partner_id = upsert_res.get("id")
+        except Exception as e:
+            logger.warning(f"Error al resolver cliente '{customer_name}' en odoo_create_quotation: {e}")
+
+    if not partner_id:
+        return {
+            "success": False,
+            "error": f"No se identificó ni pudo registrar al cliente '{customer_name or 'desconocido'}' en el sistema.",
+        }
 
     order_lines = []
     skus_to_resolve = []
@@ -411,7 +437,7 @@ async def odoo_create_quotation(
 
     create_vals = {
         "partner_id": int(partner_id),
-        "user_id": int(user_id),
+        "user_id": resolved_user_id,
         "order_line": order_lines,
     }
 
@@ -451,11 +477,12 @@ async def odoo_create_quotation(
         "action": "created",
         "order_id": int(order_id),
         "name": view_data.get("name"),
+        "partner_id": int(partner_id),
         "amount_total": view_data.get("amount_total"),
         "amount_untaxed": view_data.get("amount_untaxed"),
         "amount_tax": view_data.get("amount_tax"),
         "lines": view_data.get("lines", []),
-        "customer_name": view_data.get("customer_name"),
+        "customer_name": view_data.get("customer_name") or customer_name,
     }
 
 

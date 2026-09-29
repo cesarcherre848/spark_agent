@@ -68,7 +68,7 @@ class ContactManageNodes(BaseSynthesizerNode):
 
         trimmed_history = trim_messages(
             state.get("messages", []),
-            max_tokens=6,
+            max_tokens=15,
             strategy="last",
             token_counter=len,
         )
@@ -283,9 +283,15 @@ class ContactManageNodes(BaseSynthesizerNode):
             phones=phones,
             contact_id=contact_id,
         )
-        return {
+        ret = {
             "operation_result": result,
         }
+        if result and isinstance(result, dict) and result.get("id"):
+            ret["active_customer"] = name or result.get("name")
+            ret["active_partner_id"] = result.get("id")
+            ret["customer_name"] = name or result.get("name")
+            ret["partner_id"] = result.get("id")
+        return ret
 
     async def remove_customer_node(self, state: ContactManageState) -> dict:
         """Rama Remove: Invoca tool (remove_contact) en Odoo."""
@@ -357,7 +363,7 @@ class ContactManageNodes(BaseSynthesizerNode):
 
         trimmed_history = trim_messages(
             state.get("messages", []),
-            max_tokens=10,
+            max_tokens=15,
             strategy="last",
             token_counter=len,
         )

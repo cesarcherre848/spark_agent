@@ -121,6 +121,16 @@ class MainGraphState(TypedDict, total=False):
     iteration_count: Optional[int]
     draft_response: Optional[str]
 
+    # Contexto comercial activo multi-turno:
+    active_customer: Optional[str]
+    active_partner_id: Optional[int]
+    active_order: Optional[str]
+    active_order_id: Optional[int]
+    customer_name: Optional[str]
+    partner_id: Optional[int]
+    target_customer_name: Optional[str]
+    target_order_name: Optional[str]
+
 
 # ==============================================================================
 # 2. ESQUEMA DEL ENRUTADOR
@@ -287,7 +297,7 @@ def create_router_node(llm: BaseChatModel):
 
         trimmed_history = trim_messages(
             state.get("messages", []),
-            max_tokens=10,
+            max_tokens=15,
             strategy="last",
             token_counter=len,
         )
@@ -373,7 +383,7 @@ def create_general_chat_node(llm: BaseChatModel):
         raw_query = state.get("raw_query", "")
         trimmed_history = trim_messages(
             state.get("messages", []),
-            max_tokens=10,
+            max_tokens=15,
             strategy="last",
             token_counter=len,
         )

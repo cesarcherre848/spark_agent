@@ -1,5 +1,6 @@
 import pytest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
+from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.language_models.chat_models import BaseChatModel
 from langgraph.types import Command
 
@@ -664,4 +665,75 @@ async def test_sales_manage_rubric_judge_approval():
     assert res["reflection_action"] == "approve"
     assert res["rubric_scores"]["detail_completeness"] >= 8.0
     assert res["critique"] is None
+
+
+@pytest.mark.asyncio
+async def test_sales_manage_feedback_ambiguous_customer_handles_action_new_miriam_pacheco():
+    """Valida que ante una respuesta de usuario indicando un cliente nuevo (ej: Miriam Pacheco),
+    feedback_ambiguous_customer_node registre al cliente y planifique odoo_create_quotation
+    con el nuevo partner_id sin abortar la operación.
+    """
+    mock_llm = MagicMock(spec=BaseChatModel)
+    mock_upsert_customer = AsyncMock(return_value={"id": 77, "name": "Miriam Pacheco"})
+    nodes = SalesManageNodes(
+        llm=mock_llm,
+        upsert_customer_tool=mock_upsert_customer,
+    )
+
+    state = {
+        "raw_query": "Si por favor",
+        "candidate_partners": [],
+        "user_id": 7,
+        "items": [{"sku": "6333", "qty": 1}],
+    }
+
+    with patch("src.agent_service.graph.sub_graphs.sales_manage.nodes.interrupt") as mock_intr, \
+         patch("src.agent_service.graph.sub_graphs.sales_manage.nodes.parse_hitl_entity_selection") as mock_parse:
+        mock_intr.return_value = "Es uno nuevo\nElla se llama Miriam Pacheco"
+        mock_parse.return_value = MagicMock(action="new", selected_entity_name="Miriam Pacheco", selected_index=None)
+
+        res = await nodes.feedback_ambiguous_customer_node(state)
+
+        assert res["customer_resolved"] is True
+        assert res["customer_not_found"] is False
+        assert res["customer_name"] == "Miriam Pacheco"
+        assert res["partner_id"] == 77
+        assert res["active_customer"] == "Miriam Pacheco"
+        assert res["active_partner_id"] == 77
+        assert len(res["planned_tools"]) == 1
+        assert res["planned_tools"][0]["tool_name"] == "odoo_create_quotation"
+        assert res["planned_tools"][0]["arguments"]["partner_id"] == 77
+        assert res["planned_tools"][0]["arguments"]["customer_name"] == "Miriam Pacheco"
+        mock_upsert_customer.assert_awaited_once_with(name="Miriam Pacheco", user_id=7)
+
+
+@pytest.mark.asyncio
+async def test_sales_manage_rubric_detects_historical_order_contradiction():
+    """Valida que el Juez de Rúbrica rechace con 'replan_tools' un borrador que afirme
+    que un cliente no tiene órdenes cuando en el diálogo reciente se confirmó una orden.
+    """
+    mock_llm = MagicMock(spec=BaseChatModel)
+    nodes = SalesManageNodes(llm=mock_llm)
+
+    state = {
+        "raw_query": "Cuál fue el último pedido de Carmen Saavedra",
+        "customer_name": "Carmen Saavedra",
+        "draft_response": "He verificado nuevamente en el sistema y confirmo que, al día de hoy, no existen registros de cotizaciones ni pedidos asociados a Carmen Saavedra. Todo se encuentra en blanco.",
+        "orders_list": {"draft": [], "sale": [], "cancel": []},
+        "messages": [
+            HumanMessage(content="Ella quiere pedir ahorita 681"),
+            AIMessage(content="¡Excelente! La orden S00009 para Carmen Saavedra ha quedado confirmada con éxito."),
+            HumanMessage(content="Cuál fue el último pedido de Carmen Saavedra"),
+        ],
+        "iteration_count": 0,
+        "max_iterations": 3,
+    }
+
+    res = await nodes.rubric_evaluator_judge(state)
+
+    assert res["meets_rubric"] is False
+    assert res["reflection_action"] == "replan_tools"
+    assert "S00009" in res["critique"]
+    assert "Carmen Saavedra" in res["critique"]
+
 
