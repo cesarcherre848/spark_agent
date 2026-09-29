@@ -12,6 +12,9 @@ from src.agent_service.tools.incentive_tools import (
     odoo_get_active_incentives,
     extract_sales_trends,
     calculate_incentive_gap,
+    calculate_multibrand_incentive_gaps,
+    resolve_supplier_sales_metrics,
+    detect_target_supplier,
     get_active_incentive_targets,
 )
 
@@ -22,6 +25,98 @@ def mock_odoo_client():
     client._uid = 1
     client._client = AsyncMock()
     return client
+
+
+def test_detect_target_supplier():
+    """Valida la detección de marcas en consultas de usuario."""
+    assert detect_target_supplier("¿Cómo voy en Yanbal?")["id"] == 9
+    assert detect_target_supplier("¿Cuánto me falta en Unique?")["id"] == 9
+    assert detect_target_supplier("¿Cuáles son mis metas de Ésika?")["id"] == 17
+    assert detect_target_supplier("¿Cómo voy con Belcorp?")["id"] == 17
+    assert detect_target_supplier("¿Y en Cyzone?")["id"] == 17
+    assert detect_target_supplier("¿Cómo voy en L'Bel?")["id"] == 17
+    assert detect_target_supplier("¿Cómo van mis avances de venta?") is None
+    assert detect_target_supplier("Quiero ver mis pedidos generales") is None
+
+
+def test_resolve_supplier_sales_metrics():
+    """Valida que las líneas de pedido se particionen correctamente por proveedor."""
+    orders_data = {
+        "sale": [
+            {
+                "id": 1,
+                "lines": [
+                    {"product_name": "[5107] Base Antiedad Yanbal", "price_subtotal": 69.0, "quantity": 1.0},
+                    {"product_name": "[35515] Set Max Supreme Ésika", "price_subtotal": 142.0, "quantity": 2.0},
+                ],
+            }
+        ],
+        "draft": [
+            {
+                "id": 2,
+                "lines": [
+                    {"product_name": "[5208] Labial Glow Unique", "price_subtotal": 33.0, "quantity": 1.0}
+                ],
+            }
+        ]
+    }
+    sku_map = {
+        "5107": 9,   # Unique S.A.
+        "35515": 17, # CETCO S.A.
+        "5208": 9,   # Unique S.A.
+    }
+
+    metrics = resolve_supplier_sales_metrics(orders_data, sku_supplier_map=sku_map)
+
+    assert metrics[9]["confirmed_total_pen"] == 69.0
+    assert metrics[9]["draft_total_pen"] == 33.0
+    assert metrics[9]["potential_total_pen"] == 102.0
+    assert metrics[17]["confirmed_total_pen"] == 142.0
+    assert metrics[17]["draft_total_pen"] == 0.0
+    assert metrics[17]["potential_total_pen"] == 142.0
+
+
+def test_calculate_multibrand_incentive_gaps():
+    """Valida el cálculo de brechas independiente para cada proveedor."""
+    orders_data = {
+        "sale": [
+            {
+                "id": 1,
+                "lines": [
+                    {"product_name": "[5107] Base Antiedad Yanbal", "price_subtotal": 250.0, "quantity": 1.0},
+                    {"product_name": "[35515] Set Max Supreme Ésika", "price_subtotal": 500.0, "quantity": 1.0},
+                ],
+            }
+        ],
+        "draft": []
+    }
+    incentives = [
+        {
+            "id": 44,
+            "title": "Escala 30% Descuento",
+            "supplier_id": 9,
+            "supplier_name": "Unique S.A.",
+        },
+        {
+            "id": 26,
+            "title": "Promoción Rappel Anual 5%",
+            "supplier_id": 17,
+            "supplier_name": "CETCO S.A.",
+        }
+    ]
+    sku_map = {"5107": 9, "35515": 17}
+
+    gaps = calculate_multibrand_incentive_gaps(orders_data, incentives, sku_supplier_map=sku_map)
+
+    # Unique: 250 supera 230 (25%), pero no 720 (30%)
+    assert gaps[9]["confirmed_total_pen"] == 250.0
+    assert gaps[9]["current_discount_tier"] == "25% de Descuento"
+    assert gaps[9]["next_discount_tier"] == "30% de Descuento"
+    assert gaps[9]["gap_to_next_tier_pen"] == 470.0  # 720 - 250
+
+    # CETCO: Rappel
+    assert gaps[17]["confirmed_total_pen"] == 500.0
+    assert gaps[17]["current_discount_tier"] == "Rappel Anual 5%"
 
 
 @pytest.mark.asyncio
@@ -137,7 +232,6 @@ def test_extract_sales_trends():
     trends = extract_sales_trends(orders_data, top_k=2)
 
     assert len(trends) == 2
-    # SKU 2210 aparece en 2 órdenes distintas (order_count = 2)
     assert trends[0]["sku"] == "2210"
     assert trends[0]["total_qty"] == 5.0
     assert trends[0]["order_count"] == 2
@@ -147,10 +241,10 @@ def test_calculate_incentive_gap():
     """Valida el cálculo de brecha de ventas hacia la siguiente escala de descuento y promociones."""
     orders_data = {
         "sale": [
-            {"id": 1, "amount_total": 350.0},
+            {"id": 1, "amount_total": 350.0, "lines": []},
         ],
         "draft": [
-            {"id": 2, "amount_total": 100.0},
+            {"id": 2, "amount_total": 100.0, "lines": []},
         ]
     }
     incentive_plans = [
@@ -170,7 +264,6 @@ def test_calculate_incentive_gap():
     assert gap["confirmed_total_pen"] == 350.0
     assert gap["draft_total_pen"] == 100.0
     assert gap["potential_total_pen"] == 450.0
-    # 350.0 supera 230 (25%), pero no alcanza 720 (30%)
     assert gap["current_discount_tier"] == "25% de Descuento"
     assert gap["next_discount_tier"] == "30% de Descuento"
     assert gap["gap_to_next_tier_pen"] == 370.0  # 720.0 - 350.0
@@ -183,7 +276,8 @@ def test_calculate_incentive_gap():
 async def test_get_active_incentive_targets_integration(mock_odoo_client):
     """Valida que la herramienta puente retorne la estructura completa esperada por product_advisor."""
     with patch("src.agent_service.tools.incentive_tools.odoo_list_sales_orders", new_callable=AsyncMock) as mock_list, \
-         patch("src.agent_service.tools.incentive_tools.odoo_get_active_incentives", new_callable=AsyncMock) as mock_inc:
+         patch("src.agent_service.tools.incentive_tools.odoo_get_active_incentives", new_callable=AsyncMock) as mock_inc, \
+         patch("src.agent_service.tools.incentive_tools.get_sku_supplier_map", new_callable=AsyncMock) as mock_sku:
         mock_list.return_value = {
             "sale": [{"id": 1, "amount_total": 400.0, "lines": []}],
             "draft": [],
@@ -196,6 +290,7 @@ async def test_get_active_incentive_targets_integration(mock_odoo_client):
                 "description": "Colonia gratis",
             }
         ]
+        mock_sku.return_value = {}
 
         res = await get_active_incentive_targets(user_id=5, supplier_id=9, client=mock_odoo_client)
 

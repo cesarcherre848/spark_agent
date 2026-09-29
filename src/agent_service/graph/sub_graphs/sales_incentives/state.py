@@ -1,8 +1,8 @@
 """
-src/agent_service/graph/sub_graphs/sales_incentives/state.py - Estado tipado del subgrafo sales_incentives.
+src/agent_service/graph/sub_graphs/sales_incentives/state.py - Estado tipado del subgrafo sales_incentives con soporte multimarca.
 """
 
-from typing import TypedDict, Optional, List, Dict, Any, Union
+from typing import TypedDict, Optional, List, Dict, Any
 from langchain_core.messages import BaseMessage
 
 
@@ -16,6 +16,8 @@ class SalesIncentivesState(TypedDict, total=False):
     customer_name: Optional[str]
     supplier_id: Optional[int]
     supplier_name: Optional[str]
+    target_supplier: Optional[Dict[str, Any]]
+    is_multibrand: Optional[bool]
     channel: Optional[str]
     user_context: Optional[str]
 
@@ -24,6 +26,8 @@ class SalesIncentivesState(TypedDict, total=False):
     active_incentives: Optional[List[Dict[str, Any]]]
     sales_trends: Optional[List[Dict[str, Any]]]
     gap_info: Optional[Dict[str, Any]]
+    multibrand_gaps: Optional[Dict[int, Dict[str, Any]]]
+    multibrand_metrics: Optional[Dict[int, Dict[str, Any]]]
     current_date_str: Optional[str]
 
     # Planificación Actor-Critic con política ε-greedy

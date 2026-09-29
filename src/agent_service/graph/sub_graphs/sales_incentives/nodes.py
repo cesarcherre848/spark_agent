@@ -1,5 +1,5 @@
 """
-src/agent_service/graph/sub_graphs/sales_incentives/nodes.py - Nodos para el subgrafo sales_incentives con Actor-Critic y BaseSynthesizerNode.
+src/agent_service/graph/sub_graphs/sales_incentives/nodes.py - Nodos para el subgrafo sales_incentives con soporte Multimarca y BaseSynthesizerNode.
 """
 
 import logging
@@ -16,11 +16,17 @@ from src.agent_service.graph.sub_graphs.sales_incentives.state import SalesIncen
 from src.agent_service.graph.sub_graphs.sales_incentives.schemas import (
     IncentiveActionPlan,
     CriticPlanEvaluation,
+    SupplierIncentivePlan,
 )
 from src.agent_service.tools.incentive_tools import (
     odoo_get_active_incentives,
     extract_sales_trends,
     calculate_incentive_gap,
+    calculate_multibrand_incentive_gaps,
+    resolve_supplier_sales_metrics,
+    detect_target_supplier,
+    get_sku_supplier_map,
+    SUPPLIER_ALIASES,
 )
 from src.agent_service.tools.sales_tools import odoo_list_sales_orders
 from src.agent_service.tools.contact_tools import odoo_list_current_customers
@@ -53,44 +59,82 @@ class SalesIncentivesNodes(BaseSynthesizerNode):
         self._default_epsilon = default_epsilon
 
     async def gather_context_and_trends_node(self, state: SalesIncentivesState) -> Dict[str, Any]:
-        """Nodo 1: Recopila órdenes actuales de Odoo, consulta planes vigentes y mina tendencias de pedidos."""
+        """Nodo 1: Recopila órdenes actuales de Odoo, particiona por marca, consulta planes vigentes y mina tendencias."""
         user_id = state.get("user_id") or 5
+        raw_query = state.get("raw_query") or ""
         supplier_id = state.get("supplier_id")
         supplier_name = state.get("supplier_name")
 
-        # 1. Obtener órdenes actuales del vendedor
+        # 1. Detección automática de marca en la consulta del usuario
+        target_meta = detect_target_supplier(raw_query)
+        if target_meta:
+            supplier_id = target_meta["id"]
+            supplier_name = target_meta["name"]
+            is_multibrand = False
+        elif supplier_id is not None:
+            is_multibrand = False
+        else:
+            is_multibrand = True
+
+        # 2. Obtener órdenes actuales del vendedor
         try:
             orders_data = await self._list_orders_tool(user_id=user_id)
         except Exception as e:
             logger.warning(f"[SalesIncentives] Error al consultar órdenes en Odoo: {e}")
             orders_data = {"draft": [], "sale": [], "cancel": []}
 
-        # 2. Consultar incentivos vigentes en Odoo
+        # 3. Consultar incentivos vigentes en Odoo
         try:
             incentives = await self._get_incentives_tool(
-                supplier_id=supplier_id,
-                supplier_name=supplier_name,
+                supplier_id=supplier_id if not is_multibrand else None,
+                supplier_name=supplier_name if not is_multibrand else None,
                 only_active=True,
             )
         except Exception as e:
             logger.warning(f"[SalesIncentives] Error al consultar incentivos en Odoo: {e}")
             incentives = []
 
-        # 3. Minar tendencias de compra recientes (demanda orgánica)
-        trends = extract_sales_trends(orders_data, supplier_id=supplier_id, top_k=5)
-
-        # 4. Contexto temporal en tiempo real
+        # 4. Contexto temporal en tiempo real y SKU map
         now = datetime.now()
         current_date_str = now.strftime("%Y-%m-%d %H:%M:%S")
+        sku_map = await get_sku_supplier_map()
 
-        # 5. Cálculo de brechas hacia objetivos
-        gap_info = calculate_incentive_gap(orders_data, incentives, reference_date=now)
+        # 5. Cálculo de métricas y brechas multimarca y monomarca
+        multibrand_metrics = resolve_supplier_sales_metrics(orders_data, sku_supplier_map=sku_map)
+        multibrand_gaps = calculate_multibrand_incentive_gaps(
+            orders_data,
+            incentives,
+            reference_date=now,
+            sku_supplier_map=sku_map,
+        )
+
+        gap_info = calculate_incentive_gap(
+            orders_data,
+            incentives,
+            reference_date=now,
+            supplier_id=supplier_id if not is_multibrand else None,
+            sku_supplier_map=sku_map,
+        )
+
+        # 6. Minar tendencias de compra recientes (demanda orgánica)
+        trends = extract_sales_trends(
+            orders_data,
+            supplier_id=supplier_id if not is_multibrand else None,
+            top_k=5,
+            sku_supplier_map=sku_map,
+        )
 
         return {
+            "supplier_id": supplier_id,
+            "supplier_name": supplier_name,
+            "target_supplier": target_meta,
+            "is_multibrand": is_multibrand,
             "orders_data": orders_data,
             "active_incentives": incentives,
             "sales_trends": trends,
             "gap_info": gap_info,
+            "multibrand_gaps": multibrand_gaps,
+            "multibrand_metrics": multibrand_metrics,
             "current_date_str": current_date_str,
             "epsilon": state.get("epsilon") or self._default_epsilon,
             "iteration_count": 0,
@@ -98,9 +142,11 @@ class SalesIncentivesNodes(BaseSynthesizerNode):
         }
 
     async def actor_planner_node(self, state: SalesIncentivesState) -> Dict[str, Any]:
-        """Nodo 2 (Actor): Planificador estratégico que formula un plan de acción equilibrado con ε-greedy."""
+        """Nodo 2 (Actor): Formula un plan de acción estructurado adaptado a Multimarca o Monomarca con ε-greedy."""
         raw_query = state.get("raw_query") or ""
+        is_multibrand = state.get("is_multibrand", True)
         gap_info = state.get("gap_info") or {}
+        multibrand_gaps = state.get("multibrand_gaps") or {}
         active_incentives = state.get("active_incentives") or []
         trends = state.get("sales_trends") or []
         epsilon = state.get("epsilon") or 0.25
@@ -108,8 +154,10 @@ class SalesIncentivesNodes(BaseSynthesizerNode):
         critique = state.get("critique")
         suggested_improvements = state.get("suggested_improvements") or []
         current_date_str = state.get("current_date_str") or datetime.now().strftime("%Y-%m-%d")
+        supplier_id = state.get("supplier_id")
+        supplier_name = state.get("supplier_name")
 
-        # Obtener cartera de clientes para personalizar recomendaciones
+        # Clientes de la cartera
         user_id = state.get("user_id") or 5
         customers = []
         try:
@@ -136,33 +184,83 @@ class SalesIncentivesNodes(BaseSynthesizerNode):
             DEBES corregir estas debilidades en el nuevo plan.
             """
 
-        system_prompt = f"""
-        Eres el ACTOR y Estratega de Ventas de Spark Agent (Sales Coach).
-        Tu misión es generar un plan de acción estructurado (IncentiveActionPlan) para que el vendedor
-        maximice sus ventas y conquiste los mejores incentivos en Odoo ERP.
+        if is_multibrand:
+            # Resumen de métricas multimarca
+            brand_sections = []
+            for sid, sdata in multibrand_gaps.items():
+                s_trends = [f"{t['name']} (SKU {t['sku']})" for t in sdata.get("trends", [])[:3]]
+                s_promos = [p["title"] for p in sdata.get("product_promos", [])[:2]]
+                sec = f"""
+                MARCA / PROVEEDOR [{sdata.get('brand_display_name', sdata.get('supplier_name'))}]:
+                - Ventas Confirmadas: S/. {sdata.get('confirmed_total_pen', 0.0):.2f}
+                - Cotizaciones Pendientes: S/. {sdata.get('draft_total_pen', 0.0):.2f}
+                - Escala/Estado Actual: {sdata.get('current_discount_tier')}
+                - Siguiente Meta: {sdata.get('next_discount_tier')} (Objetivo: S/. {sdata.get('next_tier_target_pen', 0.0):.2f})
+                - Brecha en Soles: S/. {sdata.get('gap_to_next_tier_pen', 0.0):.2f}
+                - Promociones de Regalo Activas: {', '.join(s_promos) if s_promos else 'Ninguna'}
+                - Productos Tendencia de esta Marca: {', '.join(s_trends) if s_trends else 'Sin historial reciente'}
+                """
+                brand_sections.append(sec)
 
-        POLÍTICA EPSILON-GREEDY (ε-Greedy) (ε = {epsilon}):
-        1. Eje de Explotación ({(1-epsilon)*100:.0f}%): Focalízate en cerrar la brecha hacia el siguiente nivel de descuento o bono de producto en Odoo.
-        2. Eje de Exploración/Tendencia ({epsilon*100:.0f}%): Incorpora productos de alta demanda orgánica según las tendencias reales de pedidos de la cartera.
+            multibrand_context = "\n".join(brand_sections)
 
-        CONTEXTO TEMPORAL Y DE ESTADO:
-        - Fecha actual: {current_date_str}
-        - Total confirmado en Odoo: S/. {gap_info.get('confirmed_total_pen', 0.0):.2f}
-        - Total en cotizaciones pendientes (draft): S/. {gap_info.get('draft_total_pen', 0.0):.2f}
-        - Escala actual: {gap_info.get('current_discount_tier', '20%')}
-        - Siguiente escala: {gap_info.get('next_discount_tier', '25%')} (Meta: S/. {gap_info.get('next_tier_target_pen', 0.0):.2f})
-        - Brecha en soles: S/. {gap_info.get('gap_to_next_tier_pen', 0.0):.2f}
-        - Días restantes de campaña: {gap_info.get('days_remaining', 'Abierto')}
-        - Clientes activos en cartera: {', '.join(customers) if customers else 'Clientes generales'}
+            system_prompt = f"""
+            Eres el ACTOR y Estratega de Ventas Multimarca de Spark Agent (Sales Coach).
+            Tu misión es generar un plan estructurado (IncentiveActionPlan) para un vendedor que gestiona múltiples marcas comerciales (Yanbal y Belcorp).
 
-        PRODUCTOS TENDENCIA RECIENTES (Demanda Orgánica):
-        {', '.join([f"{t.get('name')} (SKU {t.get('sku')}, {t.get('total_qty')} unids)" for t in trends]) if trends else 'Sin pedidos previos registrados'}
+            MODO DE TRABAJO: MULTIMARCA AGRUPADO
+            - El usuario solicitó un balance general de sus ventas/avances.
+            - DEBES estructurar el campo `supplier_plans` con un sub-plan para cada marca con actividad o metas.
+            - Fija `is_multibrand = True`.
+            - Regla estricta: NO mezcles productos de marcas distintas en un mismo combo. Los combos de Yanbal deben contener solo productos Yanbal; los de Belcorp solo Belcorp.
 
-        PLANES DE INCENTIVO ACTIVOS EN ODOO:
-        {'; '.join([f"[{p.get('supplier_name', 'Odoo')}] {p.get('title')}: {p.get('observations', '')}" for p in active_incentives[:6]])}
+            POLÍTICA EPSILON-GREEDY (ε = {epsilon}):
+            - Para cada marca, equilibra:
+              1. 75% Explotación: Combos con bonos de producto o diseñados para cerrar la brecha hacia la siguiente escala de esa marca.
+              2. 25% Exploración: Productos de alta demanda orgánica según las tendencias reales de pedidos de esa misma marca.
 
-        {critique_block}
-        """
+            DATOS POR MARCA EN ODOO:
+            {multibrand_context}
+
+            CONTEXTO TEMPORAL Y CARTERA:
+            - Fecha actual: {current_date_str}
+            - Clientes activos en cartera: {', '.join(customers) if customers else 'Clientes generales'}
+
+            {critique_block}
+            """
+        else:
+            # Modo Monomarca Filtrado
+            display_name = SUPPLIER_ALIASES.get(supplier_id, {}).get("display_name", supplier_name or "Proveedor")
+            s_promos = [p["title"] for p in gap_info.get("product_promos", [])[:3]]
+            s_trends = [f"{t.get('name')} (SKU {t.get('sku')})" for t in trends[:4]]
+
+            system_prompt = f"""
+            Eres el ACTOR y Estratega de Ventas de Spark Agent (Sales Coach).
+            Tu misión es generar un plan estructurado (IncentiveActionPlan) enfocado EXCLUSIVAMENTE en la marca: {display_name}.
+
+            MODO DE TRABAJO: MONOMARCA FILTRADO
+            - El usuario consultó específicamente por {display_name}.
+            - Fija `is_multibrand = False` y `target_supplier_name = '{supplier_name}'`.
+            - Focaliza todos los hitos (`milestones`) y combos (`suggested_combos`) exclusivamente en {display_name}.
+            - NO menciones otras marcas a menos que el usuario lo pida explícitamente.
+
+            POLÍTICA EPSILON-GREEDY (ε = {epsilon}):
+            1. Explotación (75%): Focalízate en cerrar la brecha hacia la siguiente escala de {display_name}.
+            2. Exploración (25%): Incorpora productos de alta demanda orgánica de {display_name}.
+
+            ESTADO EN ODOO ({display_name}):
+            - Total confirmado: S/. {gap_info.get('confirmed_total_pen', 0.0):.2f}
+            - Cotizaciones pendientes (draft): S/. {gap_info.get('draft_total_pen', 0.0):.2f}
+            - Escala/Estado actual: {gap_info.get('current_discount_tier', '20%')}
+            - Siguiente meta: {gap_info.get('next_discount_tier')} (Meta: S/. {gap_info.get('next_tier_target_pen', 0.0):.2f})
+            - Brecha en soles: S/. {gap_info.get('gap_to_next_tier_pen', 0.0):.2f}
+            - Días restantes de campaña: {gap_info.get('days_remaining', 'Abierto')}
+            - Promociones activas de esta marca: {', '.join(s_promos) if s_promos else 'Ninguna'}
+            - Productos tendencia de esta marca: {', '.join(s_trends) if s_trends else 'Sin historial previo'}
+            - Clientes activos en cartera: {', '.join(customers) if customers else 'Clientes generales'}
+
+            {critique_block}
+            """
 
         structured_actor = bind_structured_output(bind_temperature(self._llm, 0.2), IncentiveActionPlan)
 
@@ -170,18 +268,21 @@ class SalesIncentivesNodes(BaseSynthesizerNode):
             plan: Optional[IncentiveActionPlan] = await structured_actor.ainvoke([
                 SystemMessage(content=system_prompt),
                 *trimmed_history,
-                HumanMessage(content=f"Consulta del usuario: {raw_query or '¿Cómo maximizo mis ventas e incentivos hoy?'}"),
+                HumanMessage(content=f"Consulta del usuario: {raw_query or '¿Cómo van mis ventas e incentivos?'}"),
             ])
             plan_dict = plan.model_dump() if plan else {}
         except Exception as e:
             logger.error(f"[SalesIncentives/Actor] Error al formular plan: {e}")
             plan_dict = {
-                "summary": "Plan de contingencia comercial para alcanzar la siguiente escala de descuento.",
+                "summary": "Plan de contingencia comercial para optimizar metas de ventas.",
                 "current_status_overview": f"Ventas confirmadas por S/. {gap_info.get('confirmed_total_pen', 0.0):.2f}.",
+                "is_multibrand": is_multibrand,
+                "target_supplier_name": supplier_name,
+                "supplier_plans": [],
                 "milestones": [],
                 "suggested_combos": [],
                 "projected_additional_earnings_pen": 0.0,
-                "epsilon_balance_rationale": "Balance por defecto ante fallback.",
+                "epsilon_balance_rationale": "Balance por defecto ante contingencia.",
             }
 
         return {
@@ -190,25 +291,26 @@ class SalesIncentivesNodes(BaseSynthesizerNode):
         }
 
     async def critic_evaluator_node(self, state: SalesIncentivesState) -> Dict[str, Any]:
-        """Nodo 3 (Critic): Evalúa la factibilidad temporal, respeto de restricciones y retorno comercial del plan."""
+        """Nodo 3 (Critic): Evalúa factibilidad temporal, respeto de restricciones comerciales e integridad de marcas."""
         candidate_plan = state.get("candidate_plan") or {}
         gap_info = state.get("gap_info") or {}
         iteration_count = state.get("iteration_count") or 1
         max_iterations = state.get("max_iterations") or self._default_max_iterations
         current_date_str = state.get("current_date_str") or datetime.now().strftime("%Y-%m-%d")
+        is_multibrand = state.get("is_multibrand", True)
 
-        # Si se alcanzó el límite máximo de iteraciones, forzar aprobación para no bloquear el turno
         if iteration_count >= max_iterations:
-            logger.info(f"[SalesIncentives/Critic] Límite máximo de iteraciones alcanzado ({iteration_count}/{max_iterations}). Aprobando mejor plan.")
+            logger.info(f"[SalesIncentives/Critic] Límite máximo de iteraciones alcanzado ({iteration_count}/{max_iterations}). Aprobando plan.")
             return {
                 "is_approved": True,
-                "critic_score": 8.0,
+                "critic_score": 8.5,
                 "critic_evaluation": {
                     "is_approved": True,
-                    "score": 8.0,
-                    "temporal_feasibility_score": 8.0,
-                    "constraint_adherence_score": 8.0,
-                    "roi_score": 8.0,
+                    "score": 8.5,
+                    "temporal_feasibility_score": 8.5,
+                    "constraint_adherence_score": 8.5,
+                    "brand_integrity_score": 9.0,
+                    "roi_score": 8.5,
                     "critiques": [],
                     "suggested_adjustments": [],
                 },
@@ -218,17 +320,19 @@ class SalesIncentivesNodes(BaseSynthesizerNode):
 
         system_prompt = f"""
         Eres el CRITIC y Juez de Calidad Comercial de Spark Agent.
-        Tu rol es evaluar con rigor técnico el plan de incentivos propuesto por el Actor:
+        Evalúa con rigor técnico el plan de incentivos propuesto por el Actor:
 
         CRITERIOS DE EVALUACIÓN:
-        1. Factibilidad Temporal: ¿Es alcanzable en los días restantes ({gap_info.get('days_remaining', 'N/A')}) o en la semana actual (Fecha: {current_date_str})?
-        2. Cumplimiento de Restricciones y Realismo: ¿Los montos de los combos corresponden con la brecha real (S/. {gap_info.get('gap_to_next_tier_pen', 0.0):.2f})?
-        3. Balance ε-Greedy: ¿El plan combina adecuadamente metas de incentivo con productos de alta demanda orgánica para no arriesgar ventas?
-        4. Accionabilidad: ¿Menciona SKUs específicos, clientes y argumentos de venta claros?
+        1. Factibilidad Temporal: ¿Es alcanzable en los días restantes ({gap_info.get('days_remaining', 'Abierto')}) considerando la fecha {current_date_str}?
+        2. Cumplimiento de Restricciones y Realismo: ¿Los montos de los combos corresponden con la brecha real en Odoo?
+        3. Integridad de Marcas (Brand Integrity):
+           - En planes multimarca: cada combo o meta debe pertenecer a su marca correspondiente. ¡No mezclar productos Belcorp para escalas Yanbal ni viceversa!
+           - En planes monomarca: el plan no debe desviarse a otras marcas no solicitadas.
+        4. Balance ε-Greedy: ¿Equilibra metas de incentivo (75%) con productos de alta demanda orgánica de esa misma marca (25%)?
 
         UMBRAL DE APROBACIÓN:
         - Si el plan cumple satisfactoriamente los 4 criterios (score >= 8.0), fija is_approved = True.
-        - Si el plan es irreal, carece de SKUs concretos o ignora la brecha numérica, fija is_approved = False y detalla las críticas y ajustes.
+        - Si detectas inconsistencias numéricas o mezcla indebida de marcas, fija is_approved = False y detalla las correcciones en suggested_adjustments.
         """
 
         structured_critic = bind_structured_output(bind_temperature(self._llm, 0.0), CriticPlanEvaluation)
@@ -259,12 +363,14 @@ class SalesIncentivesNodes(BaseSynthesizerNode):
         }
 
     async def synthesize_coaching_node(self, state: SalesIncentivesState) -> Dict[str, Any]:
-        """Nodo 4: Redacta la respuesta comercial con Soul SALES_COACH y aplica BaseSynthesizerNode.format_final_response."""
+        """Nodo 4: Redacta la respuesta comercial con Soul INCENTIVES_COACH y BaseSynthesizerNode.format_final_response."""
         plan = state.get("candidate_plan") or {}
         gap_info = state.get("gap_info") or {}
+        multibrand_gaps = state.get("multibrand_gaps") or {}
+        is_multibrand = state.get("is_multibrand", True)
+        supplier_id = state.get("supplier_id")
         raw_query = state.get("raw_query") or ""
 
-        # Historial multi-turno
         trimmed_history = trim_messages(
             state.get("messages", []),
             max_tokens=15,
@@ -277,11 +383,9 @@ class SalesIncentivesNodes(BaseSynthesizerNode):
             Eres la Coach Comercial de Ventas y Crecimiento de Spark Agent.
             Comunícate con energía motivadora, empatía ejecutiva y absoluta precisión en las cifras.
 
-            ESTRUCTURA OBLIGATORIA DEL MENSAJE:
-            1. Saludo cálido y diagnóstico claro del avance actual (total confirmado en S/., escala alcanzada y cotizaciones por cerrar).
-            2. Próximo hito al alcance de la mano con la brecha exacta en soles (S/.) o unidades.
-            3. Plan de acción recomendado (combos sugeridos combinando productos con bono de regalo y productos tendencia que los clientes ya están pidiendo).
-            4. Llamado a la acción claro y motivador para cerrar ventas hoy.
+            ESTRUCTURA DE RESPUESTA POR WHATSAPP:
+            - Si es consulta Multimarca: Saludo cálido y desglose estructurado con secciones independientes para cada marca (ej. 🌟 *Yanbal (Unique)* y 💎 *Belcorp (Ésika / Cyzone / L'Bel)*) detallando ventas confirmadas, cotizaciones, metas/escalas, brecha en soles (S/.) y combos sugeridos.
+            - Si es consulta Monomarca: Enfócate exclusivamente en la marca consultada, con su diagnóstico actual, siguiente meta, combos recomendados y llamado a la acción.
 
             REGLAS ESTRICTAS DE FORMATO:
             - Formato nativo de WhatsApp: *negrita* con un solo asterisco.
@@ -293,20 +397,18 @@ class SalesIncentivesNodes(BaseSynthesizerNode):
         )
 
         channel_instructions = BaseSynthesizerNode.get_channel_prompt_instructions(state)
-
         chat_model = bind_temperature(self._llm, 0.3)
 
         try:
             prompt_content = f"""
             Consulta del vendedor: {raw_query}
+            Modo: {'Multimarca Agrupado' if is_multibrand else 'Monomarca Filtrado'}
 
             Plan Estratégico Aprobado:
-            - Resumen: {plan.get('summary')}
-            - Estado actual: S/. {gap_info.get('confirmed_total_pen', 0.0):.2f} (Escala: {gap_info.get('current_discount_tier')})
-            - Próxima meta: {gap_info.get('next_discount_tier')} (Faltan S/. {gap_info.get('gap_to_next_tier_pen', 0.0):.2f})
-            - Hitos: {plan.get('milestones')}
-            - Combos sugeridos: {plan.get('suggested_combos')}
-            - Proyección de ganancia adicional: S/. {plan.get('projected_additional_earnings_pen', 0.0):.2f}
+            {str(plan)}
+
+            Brechas Multimarca Disponibles:
+            {str(multibrand_gaps)}
             """
 
             response = await chat_model.ainvoke([
@@ -317,17 +419,34 @@ class SalesIncentivesNodes(BaseSynthesizerNode):
             reply_text = extract_clean_text(response.content)
         except Exception as e:
             logger.error(f"[SalesIncentives/Synthesizer] Error en redacción de respuesta: {e}")
-            reply_text = (
-                f"¡Hola! Actualmente registras un avance de *S/. {gap_info.get('confirmed_total_pen', 0.0):.2f}* "
-                f"en ventas confirmadas, alcanzando la escala de *{gap_info.get('current_discount_tier', '25% de Descuento')}*.\n\n"
-                f"🎯 *Tu siguiente meta:* Te faltan solo *S/. {gap_info.get('gap_to_next_tier_pen', 0.0):.2f}* "
-                f"para conquistar el *{gap_info.get('next_discount_tier', '30% de Descuento')}*."
-            )
+            if is_multibrand:
+                u_info = multibrand_gaps.get(9, {})
+                c_info = multibrand_gaps.get(17, {})
+                reply_text = (
+                    f"¡Hola! Aquí tienes el balance de tus avances e incentivos por marca:\n\n"
+                    f"🌟 *Yanbal (Unique)*\n"
+                    f"• *Ventas confirmadas:* S/. {u_info.get('confirmed_total_pen', 0.0):.2f} (Escala: *{u_info.get('current_discount_tier', '20%')}*)\n"
+                    f"• *Cotizaciones pendientes:* S/. {u_info.get('draft_total_pen', 0.0):.2f}\n"
+                    f"• 🎯 *Siguiente meta:* Te faltan *S/. {u_info.get('gap_to_next_tier_pen', 0.0):.2f}* para el *{u_info.get('next_discount_tier', '25% de Descuento')}*\n\n"
+                    f"💎 *Belcorp (Ésika / Cyzone / L'Bel)*\n"
+                    f"• *Ventas confirmadas:* S/. {c_info.get('confirmed_total_pen', 0.0):.2f}\n"
+                    f"• 🎯 *Meta activa:* *Rappel Anual del 5%* sobre facturación neta acumulada\n\n"
+                    f"¿Deseas que preparemos un plan de acción para alguna de estas marcas hoy?"
+                )
+            else:
+                display_name = SUPPLIER_ALIASES.get(supplier_id, {}).get("display_name", "tu marca")
+                reply_text = (
+                    f"¡Hola! Para *{display_name}*, registras un avance de *S/. {gap_info.get('confirmed_total_pen', 0.0):.2f}* "
+                    f"en ventas confirmadas (Escala actual: *{gap_info.get('current_discount_tier', '20%')}*).\n\n"
+                    f"🎯 *Tu siguiente meta:* Te faltan solo *S/. {gap_info.get('gap_to_next_tier_pen', 0.0):.2f}* "
+                    f"para conquistar el *{gap_info.get('next_discount_tier', '25% de Descuento')}*."
+                )
 
-        # Formateo centralizado con BaseSynthesizerNode
         extra_meta = {
             "candidate_plan": plan,
             "gap_info": gap_info,
+            "multibrand_gaps": multibrand_gaps,
+            "is_multibrand": is_multibrand,
             "critic_score": state.get("critic_score"),
             "iteration_count": state.get("iteration_count"),
             "channel": state.get("channel") or "whatsapp",

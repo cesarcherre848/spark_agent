@@ -1,5 +1,5 @@
 """
-tests/test_sales_incentives_graph.py - Pruebas unitarias para el subgrafo sales_incentives (Actor-Critic, ε-Greedy y BaseSynthesizerNode).
+tests/test_sales_incentives_graph.py - Pruebas unitarias para el subgrafo sales_incentives (Multimarca, Actor-Critic, ε-Greedy y BaseSynthesizerNode).
 """
 
 import pytest
@@ -13,6 +13,7 @@ from src.agent_service.graph.sub_graphs.sales_incentives.schemas import (
     IncentiveActionPlan,
     IncentiveMilestone,
     SuggestedProductCombo,
+    SupplierIncentivePlan,
     CriticPlanEvaluation,
 )
 from src.agent_service.graph.sub_graphs.sales_incentives.graph import build_sales_incentives_graph
@@ -70,6 +71,34 @@ async def test_gather_context_and_trends_node(mock_llm):
 
 
 @pytest.mark.asyncio
+async def test_gather_context_and_trends_multibrand_detection(mock_llm):
+    """Valida la discriminación entre consulta monomarca ('Yanbal', 'Ésika') y consulta multimarca general."""
+    mock_list_orders = AsyncMock(return_value={"sale": [], "draft": []})
+    mock_get_incentives = AsyncMock(return_value=[])
+
+    nodes = SalesIncentivesNodes(
+        llm=mock_llm,
+        list_orders_tool=mock_list_orders,
+        get_incentives_tool=mock_get_incentives,
+    )
+
+    # 1. Consulta con marca Yanbal
+    res_yanbal = await nodes.gather_context_and_trends_node({"raw_query": "¿Cómo voy en Yanbal?"})
+    assert res_yanbal["supplier_id"] == 9
+    assert res_yanbal["is_multibrand"] is False
+
+    # 2. Consulta con marca Ésika
+    res_esika = await nodes.gather_context_and_trends_node({"raw_query": "¿Mis metas de Ésika?"})
+    assert res_esika["supplier_id"] == 17
+    assert res_esika["is_multibrand"] is False
+
+    # 3. Consulta general
+    res_general = await nodes.gather_context_and_trends_node({"raw_query": "¿Cómo van mis avances?"})
+    assert res_general["is_multibrand"] is True
+    assert "multibrand_gaps" in res_general
+
+
+@pytest.mark.asyncio
 async def test_actor_planner_node(mock_llm):
     """Valida que el Actor genere un plan de incentivos estructurado."""
     mock_plan = IncentiveActionPlan(
@@ -107,6 +136,8 @@ async def test_actor_planner_node(mock_llm):
         state = {
             "user_id": 5,
             "raw_query": "¿Qué me falta para ganar más?",
+            "is_multibrand": False,
+            "supplier_id": 9,
             "gap_info": {"confirmed_total_pen": 450.0, "gap_to_next_tier_pen": 270.0},
             "active_incentives": [],
             "sales_trends": [],
@@ -129,6 +160,7 @@ async def test_critic_evaluator_approval(mock_llm):
         score=9.0,
         temporal_feasibility_score=9.5,
         constraint_adherence_score=9.0,
+        brand_integrity_score=9.5,
         roi_score=8.5,
         critiques=[],
         suggested_adjustments=[],
@@ -162,6 +194,7 @@ async def test_critic_evaluator_rejection_and_feedback(mock_llm):
         score=6.5,
         temporal_feasibility_score=5.0,
         constraint_adherence_score=7.0,
+        brand_integrity_score=6.0,
         roi_score=7.5,
         critiques=["El monto sugerido en combos (S/. 50) es insuficiente para cubrir la brecha de S/. 270."],
         suggested_adjustments=["Incrementar la cantidad de combos o sugerir productos premium."],
@@ -201,7 +234,7 @@ async def test_critic_evaluator_forces_approval_on_max_iterations(mock_llm):
     res = await nodes.critic_evaluator_node(state)
 
     assert res["is_approved"] is True
-    assert res["critic_score"] == 8.0
+    assert res["critic_score"] == 8.5
 
 
 @pytest.mark.asyncio
@@ -213,6 +246,7 @@ async def test_synthesize_coaching_node_uses_base_synthesizer(mock_llm):
     state = {
         "candidate_plan": {"summary": "Plan de éxito"},
         "gap_info": {"confirmed_total_pen": 540.0, "gap_to_next_tier_pen": 180.0, "current_discount_tier": "25%"},
+        "is_multibrand": False,
         "channel": "whatsapp",
     }
 
@@ -232,7 +266,7 @@ async def test_sales_incentives_graph_e2e_approval(mock_llm):
         "draft": [],
     })
     mock_get_incentives = AsyncMock(return_value=[
-        {"id": 44, "title": "Escala 30%", "observations": "Desde S/ 720"}
+        {"id": 44, "title": "Escala 30%", "observations": "Desde S/ 720", "supplier_id": 9}
     ])
 
     mock_plan = IncentiveActionPlan(
@@ -259,7 +293,6 @@ async def test_sales_incentives_graph_e2e_approval(mock_llm):
         mock_critic_runnable = AsyncMock()
         mock_critic_runnable.ainvoke.return_value = mock_eval
 
-        # El bind devuelve primero al actor y luego al critic
         mock_bind.side_effect = [mock_actor_runnable, mock_critic_runnable]
 
         mock_llm.ainvoke = AsyncMock(return_value=AIMessage(content="¡Hola! Te faltan S/. 320.00 para la escala de 30%."))
