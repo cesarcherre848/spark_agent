@@ -82,26 +82,26 @@ async def test_gather_context_and_trends_multibrand_detection(mock_llm):
         get_incentives_tool=mock_get_incentives,
     )
 
-    # 1. Consulta con marca Yanbal
-    res_yanbal = await nodes.gather_context_and_trends_node({"raw_query": "¿Cómo voy en Yanbal?"})
+    # 1. Consulta con marca Yanbal (con typo yambal)
+    res_yanbal = await nodes.gather_context_and_trends_node({"raw_query": "cual es el incentiv9 mas grande que tiene yambal ahora ?"})
     assert res_yanbal["supplier_id"] == 9
-    assert res_yanbal["is_multibrand"] is False
 
     # 2. Consulta con marca Ésika
     res_esika = await nodes.gather_context_and_trends_node({"raw_query": "¿Mis metas de Ésika?"})
     assert res_esika["supplier_id"] == 17
-    assert res_esika["is_multibrand"] is False
 
     # 3. Consulta general
     res_general = await nodes.gather_context_and_trends_node({"raw_query": "¿Cómo van mis avances?"})
-    assert res_general["is_multibrand"] is True
     assert "multibrand_gaps" in res_general
 
 
 @pytest.mark.asyncio
 async def test_actor_planner_node(mock_llm):
-    """Valida que el Actor genere un plan de incentivos estructurado."""
+    """Valida que el Actor genere un plan de incentivos estructurado respondiendo directamente."""
     mock_plan = IncentiveActionPlan(
+        detected_user_intent="Consulta sobre el mayor incentivo de Yanbal",
+        target_brand_detected="Yanbal (Unique S.A.)",
+        direct_answer="El incentivo más grande de Yanbal es la Tarjeta Visa con S/. 700 netos de GanaMás Nivel 4 Bicampaña.",
         summary="Plan para alcanzar la escala del 30% en Unique.",
         current_status_overview="Avance de S/. 450.00 confirmado.",
         milestones=[

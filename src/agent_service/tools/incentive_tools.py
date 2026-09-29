@@ -26,7 +26,10 @@ SUPPLIER_ALIASES: Dict[int, Dict[str, Any]] = {
         "id": 9,
         "name": "Unique S.A.",
         "display_name": "Yanbal (Unique)",
-        "aliases": ["unique", "yanbal", "unique s.a.", "yanbal unique"],
+        "aliases": [
+            "unique", "yanbal", "yambal", "yanval", "yamval",
+            "unique s.a.", "yanbal unique", "unike",
+        ],
         "discount_tiers": [
             {"tier": "25% de Descuento", "min_amount": 230.0},
             {"tier": "30% de Descuento", "min_amount": 720.0},
@@ -38,9 +41,12 @@ SUPPLIER_ALIASES: Dict[int, Dict[str, Any]] = {
         "id": 17,
         "name": "CETCO S.A.",
         "display_name": "Belcorp (Ésika / Cyzone / L'Bel)",
-        "aliases": ["cetco", "belcorp", "esika", "ésika", "lbel", "l'bel", "cyzone", "cetco s.a."],
+        "aliases": [
+            "cetco", "belcorp", "velcorp", "esika", "ésika", "esica", "ezika",
+            "lbel", "l'bel", "cyzone", "saizone", "cetco s.a.",
+        ],
         "discount_tiers": [],
-        "base_tier": "Rappel Anual 5%",
+        "base_tier": None,
     },
 }
 
@@ -48,19 +54,30 @@ _SKU_SUPPLIER_CACHE: Dict[str, int] = {}
 
 
 def detect_target_supplier(query: Optional[str]) -> Optional[Dict[str, Any]]:
-    """Detecta si la consulta del usuario menciona una marca o proveedor específico.
-    
-    Retorna la metadata del proveedor si se identifican palabras clave o alias,
-    o None si la consulta es general / multimarca.
+    """Detecta si la consulta del usuario menciona una marca o proveedor específico,
+    tolerando variaciones fonéticas y errores de tipeo habituales (ej: 'yambal' -> Yanbal).
     """
     if not query or not isinstance(query, str):
         return None
-    q_lower = query.lower()
+    q_norm = query.lower()
+    # Normalización fonética y remoción de acentos
+    q_norm = re.sub(r"[áàä]", "a", q_norm)
+    q_norm = re.sub(r"[éèë]", "e", q_norm)
+    q_norm = re.sub(r"[íìï]", "i", q_norm)
+    q_norm = re.sub(r"[óòö]", "o", q_norm)
+    q_norm = re.sub(r"[úùü]", "u", q_norm)
+    q_norm = re.sub(r"\byambal\b", "yanbal", q_norm)
+    q_norm = re.sub(r"\byamval\b", "yanbal", q_norm)
+    q_norm = re.sub(r"\byanval\b", "yanbal", q_norm)
+    q_norm = re.sub(r"\bezika\b", "esika", q_norm)
+    q_norm = re.sub(r"\besica\b", "esika", q_norm)
+
     for sup_id, meta in SUPPLIER_ALIASES.items():
         for alias in meta["aliases"]:
-            # Búsqueda por límites de palabra para evitar falsos positivos
-            pattern = r"(?<!\w)" + re.escape(alias) + r"(?!\w)"
-            if re.search(pattern, q_lower):
+            alias_norm = alias.lower()
+            alias_norm = re.sub(r"[áéíóú]", "a", alias_norm)
+            pattern = r"(?<!\w)" + re.escape(alias_norm) + r"(?!\w)"
+            if re.search(pattern, q_norm):
                 return meta
     return None
 
@@ -479,11 +496,24 @@ def calculate_multibrand_incentive_gaps(
                         gap_to_next_tier_pen = 0.0
                         next_tier_target_pen = t["min_amount"]
         else:
-            # Caso CETCO u otros con rappel/cuota
-            current_tier = meta.get("base_tier", "Rappel Anual 5%")
-            next_tier = "Cumplimiento Cuota Anual Rappel 5%"
-            next_tier_target_pen = 2000.0  # Referencial comercial
-            gap_to_next_tier_pen = max(0.0, next_tier_target_pen - confirmed_total)
+            # Caso de proveedores sin escalas fijas (ej. CETCO): solo evaluar si hay planes activos en Odoo
+            has_rappel_plan = any("rappel" in (p.get("title") or p.get("name") or "").lower() for p in s_plans)
+            if has_rappel_plan:
+                current_tier = "Rappel Comercial Vigente"
+                next_tier = "Cumplimiento Cuota Anual Rappel 5%"
+                next_tier_target_pen = 2000.0  # Referencial si el plan está activo
+                gap_to_next_tier_pen = max(0.0, next_tier_target_pen - confirmed_total)
+            elif s_plans:
+                current_tier = "Promociones Activas"
+                next_tier = s_plans[0].get("title") or s_plans[0].get("name") or "Meta de Campaña"
+                next_tier_target_pen = 0.0
+                gap_to_next_tier_pen = 0.0
+            else:
+                # Cero planes activos en Odoo para este proveedor
+                current_tier = "Sin promociones activas"
+                next_tier = "Sin metas vigentes"
+                next_tier_target_pen = 0.0
+                gap_to_next_tier_pen = 0.0
 
         # Promociones de producto del proveedor
         product_promos = []
@@ -538,6 +568,7 @@ def calculate_multibrand_incentive_gaps(
             "next_tier_target_pen": round(next_tier_target_pen, 2),
             "gap_to_next_tier_pen": round(gap_to_next_tier_pen, 2),
             "product_promos": product_promos,
+            "has_active_incentives": bool(s_plans or discount_tiers),
             "trends": s_trends,
             "days_remaining": days_remaining,
             "orders_count": s_data.get("orders_count", 0),

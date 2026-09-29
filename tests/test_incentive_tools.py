@@ -30,8 +30,10 @@ def mock_odoo_client():
 def test_detect_target_supplier():
     """Valida la detección de marcas en consultas de usuario."""
     assert detect_target_supplier("¿Cómo voy en Yanbal?")["id"] == 9
+    assert detect_target_supplier("cual es el incentiv9 mas grande que tiene yambal ahora ?")["id"] == 9
     assert detect_target_supplier("¿Cuánto me falta en Unique?")["id"] == 9
     assert detect_target_supplier("¿Cuáles son mis metas de Ésika?")["id"] == 17
+    assert detect_target_supplier("¿Cómo voy en esica?")["id"] == 17
     assert detect_target_supplier("¿Cómo voy con Belcorp?")["id"] == 17
     assert detect_target_supplier("¿Y en Cyzone?")["id"] == 17
     assert detect_target_supplier("¿Cómo voy en L'Bel?")["id"] == 17
@@ -114,9 +116,23 @@ def test_calculate_multibrand_incentive_gaps():
     assert gaps[9]["next_discount_tier"] == "30% de Descuento"
     assert gaps[9]["gap_to_next_tier_pen"] == 470.0  # 720 - 250
 
-    # CETCO: Rappel
+    # CETCO: Rappel activo en la lista
     assert gaps[17]["confirmed_total_pen"] == 500.0
-    assert gaps[17]["current_discount_tier"] == "Rappel Anual 5%"
+    assert gaps[17]["current_discount_tier"] == "Rappel Comercial Vigente"
+    assert gaps[17]["has_active_incentives"] is True
+
+
+def test_calculate_multibrand_incentive_gaps_inactive_cetco():
+    """Valida que si CETCO tiene 0 planes activos en Odoo, no se inventen metas ficticias."""
+    orders_data = {"sale": [], "draft": []}
+    incentives = [
+        {"id": 44, "title": "Escala 30% Descuento", "supplier_id": 9, "supplier_name": "Unique S.A."}
+    ]
+    gaps = calculate_multibrand_incentive_gaps(orders_data, incentives)
+    assert gaps[17]["has_active_incentives"] is False
+    assert gaps[17]["current_discount_tier"] == "Sin promociones activas"
+    assert gaps[17]["gap_to_next_tier_pen"] == 0.0
+    assert len(gaps[17]["product_promos"]) == 0
 
 
 @pytest.mark.asyncio
