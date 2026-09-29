@@ -30,11 +30,14 @@ logger = logging.getLogger(__name__)
 COMMERCIAL_CATALOG_KEYWORDS = {
     "perfume", "perfumes", "colonia", "colonias", "fragancia", "fragancias",
     "labial", "labiales", "crema", "cremas", "maquillaje", "rimel", "máscara",
+    "delineador", "delineadores", "base", "bases", "polvo", "polvos", "sombras",
     "shampoo", "desodorante", "bloqueador", "protector", "reloj", "aretes",
     "yanbal", "yambal", "esika", "ésika", "essika", "cyzone", "lbel", "l'bel",
     "catalogo", "catálogo", "precio", "precios", "cuanto", "cuánto", "costo",
     "hombre", "hombres", "mujer", "mujeres", "niño", "niños", "niña", "niñas",
-    "comprar", "cotizar", "pedido", "producto", "productos", "opcion", "opciones",
+    "comprar", "cotizar", "cotízalos", "cotízale", "cotizame", "cotización", "cotizaciones",
+    "pedido", "pedidos", "orden", "órdenes", "ordenes", "sku", "skus", "código", "códigos",
+    "unidad", "unidades", "producto", "productos", "opcion", "opciones",
     "gama", "linea", "línea", "marca", "marcas", "ofertas", "descuentos"
 }
 
@@ -187,11 +190,11 @@ def evaluate_input_guardrail(raw_query: Optional[str]) -> GuardrailResult:
         action, category, reason, warning_msg, refusal_msg, scores = evaluate_laya_scores(answers)
 
         # Salvaguarda de Dominio Comercial: si Capa 1 no detectó transgresiones reales, la consulta es
-        # explícitamente de catálogo y Laya determinó que no es severamente dañina (< 2.0) ni fuera de ámbito (<= 0.30):
+        # explícitamente de catálogo y Laya determinó que no es fuera de ámbito (<= 0.30):
         is_comm = is_explicit_commercial_inquiry(query) or is_explicit_commercial_inquiry(query_cleaned)
         p_out_scope = scores.get("out_of_scope", 0.0)
         score_harm = scores.get("harm_severity", 0.0)
-        if is_comm and p_out_scope <= 0.30 and score_harm < 2.0:
+        if is_comm and p_out_scope <= 0.30 and score_harm < 2.5:
             if action != GuardrailAction.ALLOW:
                 logger.info(
                     f"Guardrail Capa 2: Desactivando falso {action.value} de Laya ({category.value}) para consulta comercial legítima: '{raw_query}'"

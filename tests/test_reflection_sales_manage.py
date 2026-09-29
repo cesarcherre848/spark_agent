@@ -15,6 +15,9 @@ from src.agent_service.graph.sub_graphs.sales_manage.schemas import (
     SalesDuplicateCheckResult,
     SalesSynthesizeResponse,
     SalesSKUItem,
+    SalesQualityRubricEvaluation,
+    SalesPlan,
+    PlannedSalesTool,
 )
 
 
@@ -588,3 +591,77 @@ async def test_synthesize_sales_response_fallback_formats_list_deterministically
     assert "Pedidos Confirmados" in final_text
     assert "S00003" in final_text
     assert "Adhara Banda" in final_text
+
+
+@pytest.mark.asyncio
+async def test_sales_manage_rubric_deterministic_fast_reflection():
+    """Valida que el Juez de Rúbrica rechace respuestas perezosas donde el usuario
+    pidió productos y el borrador omitió listarlos pese a tener los datos disponibles,
+    activando el Fast Reflection Loop (refine_synthesis).
+    """
+    mock_llm = MagicMock(spec=BaseChatModel)
+    nodes = SalesManageNodes(llm=mock_llm)
+
+    state = {
+        "raw_query": "dame el detalle de todos mis pedidos con productos",
+        "draft_response": "Tienes 2 cotizaciones registradas. ¿Deseas que consulte el detalle de productos?",
+        "orders_list": {
+            "draft": [
+                {
+                    "name": "S00004",
+                    "customer_name": "Janet Pupuche",
+                    "amount_total": 163.30,
+                    "lines": [{"product_name": "Amore Pink", "quantity": 2.0, "price_unit": 71.0}],
+                }
+            ],
+            "sale": [],
+            "cancel": [],
+        },
+        "iteration_count": 0,
+        "max_iterations": 3,
+    }
+
+    # Forzar evaluación de rúbrica determinista pasando mock sin estructurado
+    res = await nodes.rubric_evaluator_judge(state)
+
+    assert res["meets_rubric"] is False
+    assert res["reflection_action"] == "refine_synthesis"
+    assert res["rubric_scores"]["detail_completeness"] < 6.0
+    assert "omitió las líneas" in res["critique"]
+    assert len(res["suggested_improvements"]) > 0
+
+
+@pytest.mark.asyncio
+async def test_sales_manage_rubric_judge_approval():
+    """Valida que el Juez de Rúbrica apruebe un borrador completo con productos y montos,
+    avanzando directamente hacia finalize_response (reflection_action='approve').
+    """
+    mock_llm = MagicMock(spec=BaseChatModel)
+    nodes = SalesManageNodes(llm=mock_llm)
+
+    state = {
+        "raw_query": "dame el detalle de mis pedidos",
+        "draft_response": "Aquí tienes tus órdenes: Cotización S00004 para Janet Pupuche (Total: S/. 163.30). Productos: 2x Amore Pink.",
+        "orders_list": {
+            "draft": [
+                {
+                    "name": "S00004",
+                    "customer_name": "Janet Pupuche",
+                    "amount_total": 163.30,
+                    "lines": [{"product_name": "Amore Pink", "quantity": 2.0, "price_unit": 71.0}],
+                }
+            ],
+            "sale": [],
+            "cancel": [],
+        },
+        "iteration_count": 0,
+        "max_iterations": 3,
+    }
+
+    res = await nodes.rubric_evaluator_judge(state)
+
+    assert res["meets_rubric"] is True
+    assert res["reflection_action"] == "approve"
+    assert res["rubric_scores"]["detail_completeness"] >= 8.0
+    assert res["critique"] is None
+

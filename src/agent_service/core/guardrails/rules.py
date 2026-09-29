@@ -303,7 +303,7 @@ def evaluate_laya_scores(
         return (GuardrailAction.BLOCK, cat, reason, None, format_guardrail_refusal(cat), scores_summary)
 
     # 2. Reglas de Advertencia Comercial Amigable (WARN) - Permite el flujo comercial natural
-    if p_out_of_scope >= 0.50:
+    if p_out_of_scope >= 0.65:
         cat = ViolationCategory.OUT_OF_SCOPE
         reason = f"Consulta con probable desvío del ámbito comercial de la aplicación (probabilidad: {p_out_of_scope:.2f})"
         return (GuardrailAction.WARN, cat, reason, format_guardrail_warning(cat), None, scores_summary)

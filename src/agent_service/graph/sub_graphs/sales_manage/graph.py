@@ -1,18 +1,28 @@
 """
-src/agent_service/graph/sub_graphs/sales_manage/graph.py - Ensamble del subgrafo sales_manage
+src/agent_service/graph/sub_graphs/sales_manage/graph.py - Ensamble del subgrafo unificado sales_manage.
+
+Implementa el patrón Planner - Executor - Synthesizer con Evaluación por Rúbrica y Reflexión:
+1. Nodo Planificador (plan_and_select_tools): Analiza intención, contexto multi-turno y genera plan estructurado.
+2. Soporte HITL condicional: Confirmación humana para operaciones sensibles (confirmación, anulación, desbloqueo).
+3. Nodo Ejecutor (execute_tools): Ejecuta herramientas de Odoo de forma asíncrona.
+4. Nodo Sintetizador (synthesize_draft): Redacta borrador comercial completo atendiendo directrices de detalle de productos.
+5. Nodo Juez de Rúbrica (rubric_evaluator_judge): Evalúa calidad factual, relevancia y completitud de líneas.
+6. Loop de Reflexión:
+   - Fast Reflection Loop -> Regresa a 'synthesize_draft' si faltó claridad o se omitieron productos ya obtenidos.
+   - Slow Reflection Loop -> Regresa a 'plan_and_select_tools' si faltan datos de herramientas.
+7. Nodo Finalizador (finalize_response): Estandariza divisas y formatea nativo para WhatsApp/Web.
 """
 
-from typing import Literal, Optional, Any, Callable
+import logging
+from typing import Literal, Optional, Any, Callable, Dict
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.base import BaseCheckpointSaver
-from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.language_models.chat_models import BaseChatModel
 
 from src.agent_service.core.llms.factory import get_default_llm
 from src.agent_service.graph.sub_graphs.sales_manage.state import SalesManageState
 from src.agent_service.graph.sub_graphs.sales_manage.nodes import SalesManageNodes
 from src.agent_service.tools.sales_tools import (
-    extract_order_code,
     odoo_list_sales_orders,
     odoo_list_current_sales_orders,
     odoo_create_quotation,
@@ -23,200 +33,139 @@ from src.agent_service.tools.sales_tools import (
     odoo_update_order,
     odoo_lock_order,
     odoo_remove_sale_order,
+    get_shared_odoo_client,
 )
-
 from src.agent_service.tools.contact_tools import (
     odoo_list_current_customers,
     odoo_upsert_customer,
 )
 
+logger = logging.getLogger(__name__)
 
-def _route_after_extraction(
+
+def _route_after_planning(
     state: SalesManageState,
 ) -> Literal[
-    "view_quotation_node",
-    "update_quotation_node",
-    "confirm_order_node",
-    "list_sales_orders_node",
-    "feedback_remove_order_node",
-    "guardrail_unlock_node",
-    "resolve_customer_node",
-]:
-    """Enrutador posterior a la extracción: aplica patrón híbrido (Fast-Path vs Slow-Path)."""
-    action = state.get("sales_action", "list")
-    raw_query = state.get("raw_query") or ""
-    has_explicit_order = bool(extract_order_code(raw_query))
-    has_target = bool(state.get("target_order_name") or state.get("target_order_id"))
-    has_customer = bool(state.get("customer_name"))
-
-    # 1. Fast-Path: Ver cotización u orden específica
-    if action == "view" or (action == "list" and has_target):
-        return "view_quotation_node"
-
-    # 2. Fast-Path: Modificación o adición de líneas a una orden existente
-    if action in ("remove_items", "add_items") and has_target:
-        return "update_quotation_node"
-
-    if action == "upsert" and has_target:
-        return "update_quotation_node"
-
-
-    # 3. Confirmación directa si ya se tiene la orden identificada
-    if action == "confirm" and has_target:
-        return "confirm_order_node"
-
-    # 4. Listado general sin orden específica
-    if action == "list":
-        return "list_sales_orders_node"
-
-    # 5. Guardrail HITL: Cancelación / anulación
-    if action == "remove":
-        return "feedback_remove_order_node"
-
-    # 6. Guardrail HITL: Edición de pedido confirmado / bloqueado
-    if action == "edit_order":
-        return "guardrail_unlock_node"
-
-    # 7. Slow-Path: Nueva cotización o gestión que requiere resolución de cliente
-    return "resolve_customer_node"
-
-
-def _route_after_reflection(
-    state: SalesManageState,
-) -> Literal[
+    "execute_tools",
     "feedback_intent_clarification_node",
-    "view_quotation_node",
-    "update_quotation_node",
-    "confirm_order_node",
-    "list_sales_orders_node",
+    "feedback_ambiguous_customer_node",
+    "feedback_duplicate_sales_node",
     "feedback_remove_order_node",
     "guardrail_unlock_node",
-    "resolve_customer_node",
+    "synthesize_draft",
 ]:
-    """Enrutador posterior a la reflexión: si la intención es ambigua, escala a HITL; si no, avanza."""
-    if state.get("is_intent_clear") is False:
-        return "feedback_intent_clarification_node"
-    return _route_after_extraction(state)
+    """Enrutador condicional tras la fase de planificación:
+    - Si se canceló la operación -> synthesize_draft
+    - Si requiere HITL de cancelación -> feedback_remove_order_node
+    - Si requiere HITL de desbloqueo -> guardrail_unlock_node
+    - Si requiere resolución de cliente ambiguo -> feedback_ambiguous_customer_node
+    - Si requiere resolución de duplicados -> feedback_duplicate_sales_node
+    - Si requiere aclaración de intención / conflicto -> feedback_intent_clarification_node
+    - En otro caso -> execute_tools directamente
+    """
+    if state.get("cancellation_reason"):
+        return "synthesize_draft"
+
+    requires_hitl = state.get("requires_hitl", False)
+    hitl_type = state.get("hitl_type")
+
+    if requires_hitl:
+        if hitl_type == "remove_order" and not state.get("remove_confirmed"):
+            return "feedback_remove_order_node"
+        elif hitl_type == "unlock_order" and not state.get("unlock_confirmed"):
+            return "guardrail_unlock_node"
+        elif hitl_type == "ambiguous_customer":
+            return "feedback_ambiguous_customer_node"
+        elif hitl_type == "duplicate":
+            return "feedback_duplicate_sales_node"
+        elif hitl_type == "clarification":
+            return "feedback_intent_clarification_node"
+
+    return "execute_tools"
+
+
+def _route_after_ambiguous_customer(
+    state: SalesManageState,
+) -> Literal["feedback_duplicate_sales_node", "execute_tools", "synthesize_draft"]:
+    if state.get("cancellation_reason"):
+        return "synthesize_draft"
+    if state.get("requires_hitl") and state.get("hitl_type") == "duplicate":
+        return "feedback_duplicate_sales_node"
+    return "execute_tools"
+
+
+def _route_after_duplicate_sales(
+    state: SalesManageState,
+) -> Literal["execute_tools", "synthesize_draft"]:
+    if state.get("cancellation_reason"):
+        return "synthesize_draft"
+    return "execute_tools"
 
 
 def _route_after_intent_clarification(
     state: SalesManageState,
-) -> Literal[
-    "view_quotation_node",
-    "update_quotation_node",
-    "confirm_order_node",
-    "list_sales_orders_node",
-    "feedback_remove_order_node",
-    "guardrail_unlock_node",
-    "resolve_customer_node",
-    "synthesize_sales_response",
-]:
-    """Enrutador tras aclaración HITL de intención."""
+) -> Literal["execute_tools", "synthesize_draft"]:
     if state.get("cancellation_reason"):
-        return "synthesize_sales_response"
-    return _route_after_extraction(state)
+        return "synthesize_draft"
+    return "execute_tools"
 
 
-
-def _route_after_customer_resolution(
+def _route_after_remove_order(
     state: SalesManageState,
-) -> Literal["feedback_ambiguous_customer_node", "feedback_unknown_customer_node", "list_current_sales_orders_node"]:
-    """Enrutador de resolución de clientes: detecta ambigüedad, inexistencia o coincidencia inequívoca."""
-    if state.get("candidate_partners") and len(state["candidate_partners"]) > 1:
-        return "feedback_ambiguous_customer_node"
-    if state.get("customer_not_found"):
-        return "feedback_unknown_customer_node"
-    return "list_current_sales_orders_node"
-
-
-def _route_after_ambiguous_feedback(
-    state: SalesManageState,
-) -> Literal["list_current_sales_orders_node", "feedback_unknown_customer_node", "synthesize_sales_response"]:
-    """Enrutador tras aclaración de ambigüedad de clientes."""
-    if state.get("customer_resolved"):
-        return "list_current_sales_orders_node"
-    if state.get("customer_not_found"):
-        return "feedback_unknown_customer_node"
-    return "synthesize_sales_response"
-
-
-def _route_after_unknown_feedback(
-    state: SalesManageState,
-) -> Literal["list_current_sales_orders_node", "synthesize_sales_response"]:
-    """Enrutador tras ofrecimiento de alta de cliente."""
-    if state.get("customer_resolved"):
-        return "list_current_sales_orders_node"
-    return "synthesize_sales_response"
-
-
-def _route_action_branch(
-    state: SalesManageState,
-) -> Literal["update_quotation_node", "create_quotation_node", "confirm_order_node", "guardrail_unlock_node", "synthesize_sales_response"]:
-    """Bifurca hacia la acción específica (upsert, confirm, edit_order)."""
-    action = state.get("sales_action", "upsert")
-    choice = state.get("duplicate_choice", "new")
-    has_target = bool(state.get("target_order_id") or state.get("target_order_name"))
-
-    if action in ("upsert", "add_items", "remove_items"):
-        if choice == "selected" or (has_target and choice != "new"):
-            return "update_quotation_node"
-        return "create_quotation_node"
-
-
-    if action == "confirm":
-        if has_target:
-            return "confirm_order_node"
-        return "create_quotation_node"
-
-    if action == "edit_order":
-        return "guardrail_unlock_node"
-
-    return "synthesize_sales_response"
-
-
-def _route_after_duplicate_judge(
-    state: SalesManageState,
-) -> Literal["feedback_duplicate_sales_node", "update_quotation_node", "create_quotation_node", "confirm_order_node", "guardrail_unlock_node", "synthesize_sales_response"]:
-    """Enrutador tras evaluación de duplicados por el LLM."""
-    if state.get("has_possible_duplicates", False):
-        return "feedback_duplicate_sales_node"
-    return _route_action_branch(state)
-
-
-def _route_after_duplicate_feedback(
-    state: SalesManageState,
-) -> Literal["update_quotation_node", "create_quotation_node", "confirm_order_node", "guardrail_unlock_node", "synthesize_sales_response"]:
-    """Enrutador tras respuesta HITL de duplicados."""
-    if state.get("duplicate_choice") == "cancel":
-        return "synthesize_sales_response"
-    return _route_action_branch(state)
-
-
-def _route_after_create_quotation(
-    state: SalesManageState,
-) -> Literal["confirm_order_node", "view_quotation_node"]:
-    """Enrutador tras crear cotización: si la acción era confirmación directa, avanza a confirmar."""
-    if state.get("sales_action") == "confirm":
-        return "confirm_order_node"
-    return "view_quotation_node"
+) -> Literal["execute_tools", "synthesize_draft"]:
+    if state.get("cancellation_reason"):
+        return "synthesize_draft"
+    return "execute_tools"
 
 
 def _route_after_guardrail_unlock(
     state: SalesManageState,
-) -> Literal["unlock_order_node", "synthesize_sales_response"]:
-    """Enrutador tras decisión HITL del guardrail de desbloqueo."""
-    if state.get("unlock_confirmed", False):
-        return "unlock_order_node"
-    return "synthesize_sales_response"
+) -> Literal["execute_tools", "synthesize_draft"]:
+    if state.get("cancellation_reason"):
+        return "synthesize_draft"
+    return "execute_tools"
 
 
-def _route_after_remove_confirm(
+def _route_after_rubric(
     state: SalesManageState,
-) -> Literal["remove_order_node", "synthesize_sales_response"]:
-    """Enrutador tras confirmación HITL de anulación de orden."""
-    if state.get("remove_confirmed", False):
-        return "remove_order_node"
-    return "synthesize_sales_response"
+) -> Literal["finalize_response", "synthesize_draft", "plan_and_select_tools"]:
+    """Enrutador condicional tras la evaluación por rúbrica:
+    - Si cumple la rúbrica -> finalize_response
+    - Si iteration_count >= max_iterations (default 3) -> finalize_response (corte forzoso)
+    - Si no cumple e iteration_count < max_iterations:
+      * Si reflection_action == "refine_synthesis" -> synthesize_draft (Fast Reflection Loop)
+      * En otro caso -> plan_and_select_tools (Slow Reflection Loop)
+    """
+    meets_rubric = state.get("meets_rubric", False)
+    iteration_count = state.get("iteration_count", 0)
+    max_iterations = state.get("max_iterations", 3)
+    reflection_action = state.get("reflection_action", "replan_tools")
+
+    if meets_rubric or reflection_action == "approve":
+        logger.info(
+            f"sales_manage: Rúbrica APROBADA (iteración {iteration_count}). Avanzando a finalización."
+        )
+        return "finalize_response"
+
+    if iteration_count >= max_iterations:
+        logger.warning(
+            f"sales_manage: Rúbrica NO alcanzada tras {iteration_count} iteraciones. "
+            f"Alcanzado límite máximo ({max_iterations}); finalizando con mejor respuesta disponible."
+        )
+        return "finalize_response"
+
+    if reflection_action == "refine_synthesis":
+        logger.info(
+            f"sales_manage: Rúbrica RECHAZADA por claridad o detalle omitido (iteración {iteration_count}/{max_iterations}). "
+            "Ejecutando Fast Reflection Loop hacia 'synthesize_draft' para refinar redacción sin re-ejecutar herramientas."
+        )
+        return "synthesize_draft"
+
+    logger.info(
+        f"sales_manage: Rúbrica RECHAZADA por datos insuficientes (iteración {iteration_count}/{max_iterations}). "
+        "Re-planificando con herramientas en 'plan_and_select_tools'."
+    )
+    return "plan_and_select_tools"
 
 
 def build_sales_manage_graph(
@@ -233,9 +182,12 @@ def build_sales_manage_graph(
     remove_order_tool: Any = odoo_remove_sale_order,
     list_customers_tool: Any = odoo_list_current_customers,
     upsert_customer_tool: Any = odoo_upsert_customer,
+    catalog_search_tool: Optional[Any] = None,
+    default_max_iterations: int = 3,
     checkpointer: Optional[BaseCheckpointSaver] = None,
+    tools_registry: Optional[Dict[str, Any]] = None,
 ):
-    """Construye y compila el subgrafo sales_manage con soporte de Human-in-the-Loop y herramientas desacopladas."""
+    """Construye y compila el subgrafo unificado sales_manage con patrón Planner-Executor y reflexión."""
     nodes = SalesManageNodes(
         llm=llm,
         list_orders_tool=list_orders_tool,
@@ -250,174 +202,130 @@ def build_sales_manage_graph(
         remove_order_tool=remove_order_tool,
         list_customers_tool=list_customers_tool,
         upsert_customer_tool=upsert_customer_tool,
+        catalog_search_tool=catalog_search_tool,
+        default_max_iterations=default_max_iterations,
+        tools_registry=tools_registry,
     )
 
     workflow = StateGraph(state_schema=SalesManageState)
 
-    # 1. Registro de nodos
-    workflow.add_node("extract_sales_info", nodes.extract_sales_info)
-    workflow.add_node("reflect_intent_node", nodes.reflect_intent_node)
+    # 1. Registro de nodos principales del patrón
+    workflow.add_node("plan_and_select_tools", nodes.plan_and_select_tools)
+    workflow.add_node("execute_tools", nodes.execute_tools)
+    workflow.add_node("synthesize_draft", nodes.synthesize_draft)
+    workflow.add_node("rubric_evaluator_judge", nodes.rubric_evaluator_judge)
+    workflow.add_node("finalize_response", nodes.finalize_response)
+
+    # Nodos HITL para confirmaciones y desambiguación
     workflow.add_node("feedback_intent_clarification_node", nodes.feedback_intent_clarification_node)
-    workflow.add_node("list_sales_orders_node", nodes.list_sales_orders_node)
-    workflow.add_node("resolve_customer_node", nodes.resolve_customer_node)
     workflow.add_node("feedback_ambiguous_customer_node", nodes.feedback_ambiguous_customer_node)
-    workflow.add_node("feedback_unknown_customer_node", nodes.feedback_unknown_customer_node)
-    workflow.add_node("list_current_sales_orders_node", nodes.list_current_sales_orders_node)
-    workflow.add_node("duplicate_candidates_judge_node", nodes.duplicate_candidates_judge_node)
     workflow.add_node("feedback_duplicate_sales_node", nodes.feedback_duplicate_sales_node)
-    workflow.add_node("create_quotation_node", nodes.create_quotation_node)
-    workflow.add_node("update_quotation_node", nodes.update_quotation_node)
-    workflow.add_node("view_quotation_node", nodes.view_quotation_node)
-    workflow.add_node("confirm_order_node", nodes.confirm_order_node)
-    workflow.add_node("guardrail_unlock_node", nodes.guardrail_unlock_node)
-    workflow.add_node("unlock_order_node", nodes.unlock_order_node)
-    workflow.add_node("update_order_node", nodes.update_order_node)
-    workflow.add_node("lock_order_node", nodes.lock_order_node)
     workflow.add_node("feedback_remove_order_node", nodes.feedback_remove_order_node)
-    workflow.add_node("remove_order_node", nodes.remove_order_node)
-    workflow.add_node("synthesize_sales_response", nodes.synthesize_sales_response)
+    workflow.add_node("guardrail_unlock_node", nodes.guardrail_unlock_node)
 
     # 2. Conexiones
-    workflow.add_edge(START, "extract_sales_info")
-    workflow.add_edge("extract_sales_info", "reflect_intent_node")
+    workflow.add_edge(START, "plan_and_select_tools")
 
-    # Bifurcación tras reflexión crítica (escala a HITL si hay duda o enruta directamente)
     workflow.add_conditional_edges(
-        "reflect_intent_node",
-        _route_after_reflection,
+        "plan_and_select_tools",
+        _route_after_planning,
         {
+            "execute_tools": "execute_tools",
             "feedback_intent_clarification_node": "feedback_intent_clarification_node",
-            "view_quotation_node": "view_quotation_node",
-            "update_quotation_node": "update_quotation_node",
-            "confirm_order_node": "confirm_order_node",
-            "list_sales_orders_node": "list_sales_orders_node",
-            "feedback_remove_order_node": "feedback_remove_order_node",
-            "guardrail_unlock_node": "guardrail_unlock_node",
-            "resolve_customer_node": "resolve_customer_node",
-        },
-    )
-
-    # Bifurcación tras aclaración HITL de intención
-    workflow.add_conditional_edges(
-        "feedback_intent_clarification_node",
-        _route_after_intent_clarification,
-        {
-            "view_quotation_node": "view_quotation_node",
-            "update_quotation_node": "update_quotation_node",
-            "confirm_order_node": "confirm_order_node",
-            "list_sales_orders_node": "list_sales_orders_node",
-            "feedback_remove_order_node": "feedback_remove_order_node",
-            "guardrail_unlock_node": "guardrail_unlock_node",
-            "resolve_customer_node": "resolve_customer_node",
-            "synthesize_sales_response": "synthesize_sales_response",
-        },
-    )
-
-
-    # Rama List
-    workflow.add_edge("list_sales_orders_node", "synthesize_sales_response")
-
-    # Resolución de clientes
-    workflow.add_conditional_edges(
-        "resolve_customer_node",
-        _route_after_customer_resolution,
-        {
             "feedback_ambiguous_customer_node": "feedback_ambiguous_customer_node",
-            "feedback_unknown_customer_node": "feedback_unknown_customer_node",
-            "list_current_sales_orders_node": "list_current_sales_orders_node",
+            "feedback_duplicate_sales_node": "feedback_duplicate_sales_node",
+            "feedback_remove_order_node": "feedback_remove_order_node",
+            "guardrail_unlock_node": "guardrail_unlock_node",
+            "synthesize_draft": "synthesize_draft",
         },
     )
+
+    # Conexiones condicionales de salidas HITL
     workflow.add_conditional_edges(
         "feedback_ambiguous_customer_node",
-        _route_after_ambiguous_feedback,
-        {
-            "list_current_sales_orders_node": "list_current_sales_orders_node",
-            "feedback_unknown_customer_node": "feedback_unknown_customer_node",
-            "synthesize_sales_response": "synthesize_sales_response",
-        },
-    )
-    workflow.add_conditional_edges(
-        "feedback_unknown_customer_node",
-        _route_after_unknown_feedback,
-        {
-            "list_current_sales_orders_node": "list_current_sales_orders_node",
-            "synthesize_sales_response": "synthesize_sales_response",
-        },
-    )
-
-    # Subflujo de duplicados
-    workflow.add_edge("list_current_sales_orders_node", "duplicate_candidates_judge_node")
-    workflow.add_conditional_edges(
-        "duplicate_candidates_judge_node",
-        _route_after_duplicate_judge,
+        _route_after_ambiguous_customer,
         {
             "feedback_duplicate_sales_node": "feedback_duplicate_sales_node",
-            "update_quotation_node": "update_quotation_node",
-            "create_quotation_node": "create_quotation_node",
-            "confirm_order_node": "confirm_order_node",
-            "guardrail_unlock_node": "guardrail_unlock_node",
-            "synthesize_sales_response": "synthesize_sales_response",
+            "execute_tools": "execute_tools",
+            "synthesize_draft": "synthesize_draft",
         },
     )
     workflow.add_conditional_edges(
         "feedback_duplicate_sales_node",
-        _route_after_duplicate_feedback,
+        _route_after_duplicate_sales,
         {
-            "update_quotation_node": "update_quotation_node",
-            "create_quotation_node": "create_quotation_node",
-            "confirm_order_node": "confirm_order_node",
-            "guardrail_unlock_node": "guardrail_unlock_node",
-            "synthesize_sales_response": "synthesize_sales_response",
+            "execute_tools": "execute_tools",
+            "synthesize_draft": "synthesize_draft",
         },
     )
-
-    # Creación y actualización de cotización
     workflow.add_conditional_edges(
-        "create_quotation_node",
-        _route_after_create_quotation,
+        "feedback_intent_clarification_node",
+        _route_after_intent_clarification,
         {
-            "confirm_order_node": "confirm_order_node",
-            "view_quotation_node": "view_quotation_node",
+            "execute_tools": "execute_tools",
+            "synthesize_draft": "synthesize_draft",
         },
     )
-    workflow.add_edge("update_quotation_node", "view_quotation_node")
-    workflow.add_edge("view_quotation_node", "synthesize_sales_response")
-
-    # Confirmación
-    workflow.add_edge("confirm_order_node", "synthesize_sales_response")
-
-    # Rama Edit Order (desbloqueo ➔ actualización ➔ re-bloqueo)
+    workflow.add_conditional_edges(
+        "feedback_remove_order_node",
+        _route_after_remove_order,
+        {
+            "execute_tools": "execute_tools",
+            "synthesize_draft": "synthesize_draft",
+        },
+    )
     workflow.add_conditional_edges(
         "guardrail_unlock_node",
         _route_after_guardrail_unlock,
         {
-            "unlock_order_node": "unlock_order_node",
-            "synthesize_sales_response": "synthesize_sales_response",
+            "execute_tools": "execute_tools",
+            "synthesize_draft": "synthesize_draft",
         },
     )
-    workflow.add_edge("unlock_order_node", "update_order_node")
-    workflow.add_edge("update_order_node", "lock_order_node")
-    workflow.add_edge("lock_order_node", "synthesize_sales_response")
 
-    # Rama Remove
+    workflow.add_edge("execute_tools", "synthesize_draft")
+    workflow.add_edge("synthesize_draft", "rubric_evaluator_judge")
+
+    # Bifurcación condicional tras evaluación por rúbrica
     workflow.add_conditional_edges(
-        "feedback_remove_order_node",
-        _route_after_remove_confirm,
+        "rubric_evaluator_judge",
+        _route_after_rubric,
         {
-            "remove_order_node": "remove_order_node",
-            "synthesize_sales_response": "synthesize_sales_response",
+            "finalize_response": "finalize_response",
+            "synthesize_draft": "synthesize_draft",
+            "plan_and_select_tools": "plan_and_select_tools",
         },
     )
-    workflow.add_edge("remove_order_node", "synthesize_sales_response")
 
-    # Salida
-    workflow.add_edge("synthesize_sales_response", END)
+    workflow.add_edge("finalize_response", END)
 
+    from langgraph.checkpoint.memory import MemorySaver
     cp = checkpointer or MemorySaver()
     return workflow.compile(checkpointer=cp)
 
 
 def get_sales_manage_graph(checkpointer: Optional[BaseCheckpointSaver] = None):
-    """Factory helper para instanciar y compilar sales_manage con el LLM por defecto."""
+    """Fábrica oficial para instanciar y compilar sales_manage con herramientas conectadas."""
     llm = get_default_llm()
-    return build_sales_manage_graph(llm=llm, checkpointer=checkpointer)
+
+    # Intentar cargar herramienta de búsqueda semántica de catálogo si el entorno lo permite
+    catalog_tool = None
+    try:
+        from src.agent_service.tools.product_tools import create_search_product_catalog_tool
+        from src.agent_service.config.database import get_db_pool
+        from src.agent_service.core.embeddings.factory import get_embedding_service
+        from src.agent_service.core.stores.product.vector_store import ProductVectorStore
+
+        pool = get_db_pool()
+        embeddings = get_embedding_service()
+        vector_store = ProductVectorStore(pool=pool, embedding_service=embeddings)
+        catalog_tool = create_search_product_catalog_tool(vector_store)
+    except Exception as exc:
+        logger.warning(f"[SalesManageGraph] No se pudo inicializar búsqueda semántica para órdenes: {exc}")
+
+    return build_sales_manage_graph(
+        llm=llm,
+        catalog_search_tool=catalog_tool,
+        default_max_iterations=3,
+        checkpointer=checkpointer,
+    )

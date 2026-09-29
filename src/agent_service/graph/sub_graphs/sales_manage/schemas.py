@@ -2,7 +2,7 @@
 src/agent_service/graph/sub_graphs/sales_manage/schemas.py - Esquemas Pydantic estructurados para sales_manage
 """
 
-from typing import Optional, List, Literal
+from typing import Optional, List, Dict, Any, Literal
 from pydantic import BaseModel, Field
 
 
@@ -20,7 +20,6 @@ class SalesSKUItem(BaseModel):
             "'subtract': Para restar, quitar o reducir cierta cantidad de unidades (ej: 'elimina 2 items de 6189', 'resta 1 unidad', 'quita 2')."
         ),
     )
-
 
 
 class SalesExtractionResult(BaseModel):
@@ -113,3 +112,118 @@ class SalesReflectionResult(BaseModel):
         description="Opciones concisas sugeridas para la aclaración en el interrupt HITL.",
     )
 
+
+# ==============================================================================
+# Esquemas Pydantic para el Patrón Planner - Executor con Reflexión
+# ==============================================================================
+
+class PlannedSalesTool(BaseModel):
+    """Definición estructurada de una invocación de herramienta decidida por el planificador."""
+    tool_name: Literal[
+        "odoo_list_sales_orders",
+        "odoo_view_quotation",
+        "odoo_create_quotation",
+        "odoo_update_quotation",
+        "odoo_confirm_order",
+        "odoo_remove_sale_order",
+        "odoo_unlock_order",
+        "odoo_update_order",
+        "odoo_lock_order",
+        "odoo_list_current_customers",
+        "odoo_upsert_customer",
+        "search_product_catalog",
+        "get_product_odoo_details",
+    ] = Field(description="Nombre exacto de la herramienta comercial a invocar.")
+    arguments: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Argumentos estructurados pasados a la herramienta.",
+    )
+    purpose: str = Field(description="Razón y objetivo comercial por el cual se invoca esta herramienta.")
+
+
+class SalesPlan(BaseModel):
+    """Plan de acción generado por el Sales Planner para resolver la consulta comercial."""
+    reasoning: str = Field(
+        description="Análisis estructurado de la intención, requerimientos, cliente activo y contexto multi-turno."
+    )
+    strategy: Literal[
+        "list_orders",
+        "view_order_details",
+        "create_quotation",
+        "update_quotation",
+        "confirm_order",
+        "cancel_order",
+        "edit_confirmed_order",
+        "resolve_customer",
+    ] = Field(
+        default="list_orders",
+        description="Estrategia general adoptada para responder a la necesidad comercial.",
+    )
+    target_customer: Optional[str] = Field(
+        default=None,
+        description="Nombre del cliente o razón social de la empresa asociada a la orden.",
+    )
+    target_order_name: Optional[str] = Field(
+        default=None,
+        description="Código comercial de la orden o cotización (ej: 'SO001', 'S00003') si está referenciada.",
+    )
+    requires_hitl: bool = Field(
+        default=False,
+        description="True si la acción requiere confirmación humana obligatoria (confirmación definitiva, anulación, desbloqueo o ambigüedad).",
+    )
+    hitl_type: Optional[Literal["confirm_order", "remove_order", "unlock_order", "ambiguous_customer"]] = Field(
+        default=None,
+        description="Tipo específico de interruptor HITL requerido.",
+    )
+    hitl_question: Optional[str] = Field(
+        default=None,
+        description="Pregunta en lenguaje natural o resumen ejecutivo para presentar al usuario en el interrupt.",
+    )
+    tool_calls: List[PlannedSalesTool] = Field(
+        default_factory=list,
+        description="Lista ordenada de herramientas a ejecutar para obtener o mutar los datos necesarios en Odoo.",
+    )
+
+
+class SalesQualityRubricEvaluation(BaseModel):
+    """Rúbrica de evaluación multi-criterio para evaluar la calidad, fidelidad y completitud de la respuesta."""
+    relevance_score: float = Field(
+        ...,
+        ge=1.0,
+        le=10.0,
+        description="Puntaje de 1 a 10: ¿La respuesta satisface directamente la consulta comercial pedida?",
+    )
+    grounding_score: float = Field(
+        ...,
+        ge=1.0,
+        le=10.0,
+        description="Puntaje de 1 a 10: ¿Los códigos de orden, clientes, productos, cantidades y montos provienen 100% de las herramientas ejecutadas sin alucinación?",
+    )
+    detail_completeness_score: float = Field(
+        ...,
+        ge=1.0,
+        le=10.0,
+        description="Puntaje de 1 a 10: Si el usuario solicitó ver o incluir productos/ítems, ¿se listaron explícitamente sin preguntas perezosas de si desea verlos?",
+    )
+    whitelabel_and_safety_score: float = Field(
+        ...,
+        ge=1.0,
+        le=10.0,
+        description="Puntaje de 1 a 10: ¿Se evitaron IDs internos (partner_id, user_id), términos de backend (Odoo/ERP), y se aplicó formato comercial sobrio?",
+    )
+    is_approved: bool = Field(
+        ...,
+        description="True si todos los criterios son >= 7.0 y el promedio es >= 8.0.",
+    )
+    reflection_action: Literal["approve", "refine_synthesis", "replan_tools"] = Field(
+        default="approve",
+        description="Acción de reflexión: 'approve' si pasa; 'refine_synthesis' si los datos son válidos pero la redacción omitió detalles o fue perezosa; 'replan_tools' si faltan herramientas de Odoo.",
+    )
+    critique: Optional[str] = Field(
+        default=None,
+        description="Explicación detallada de los puntos débiles o fallos si la rúbrica es rechazada.",
+    )
+    remedy_suggestions: Optional[List[str]] = Field(
+        default_factory=list,
+        description="Acciones correctivas sugeridas para que el planificador o sintetizador ajuste en la siguiente iteración.",
+    )

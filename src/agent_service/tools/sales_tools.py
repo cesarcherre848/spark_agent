@@ -12,6 +12,7 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime
 
 from src.agent_service.core.stores.product.odoo_client import OdooClient
+from src.agent_service.core.stores.product.schemas import ProductOdooDetail
 from src.agent_service.config.odoo import get_odoo_settings
 
 logger = logging.getLogger(__name__)
@@ -347,18 +348,25 @@ async def odoo_create_quotation(
 
     order_lines = []
     skus_to_resolve = []
-    items_clean = items or []
+    items_clean = []
+    for it in (items or []):
+        it_dict = dict(it)
+        if "sku" not in it_dict or not it_dict["sku"]:
+            it_dict["sku"] = it_dict.get("product_name") or it_dict.get("name") or ""
+        if "qty" not in it_dict:
+            it_dict["qty"] = it_dict.get("quantity") or it_dict.get("cantidad") or 1.0
+        items_clean.append(it_dict)
 
     for it in items_clean:
         if not it.get("product_id") and it.get("sku"):
-            skus_to_resolve.append(str(it["sku"]))
+            skus_to_resolve.append(str(it["sku"]).strip())
 
     # Si hay SKUs sin product_id numérico, resolverlos
     resolved_skus_map = {}
     not_found_skus = []
     if skus_to_resolve:
         prod_res = await c.get_products_by_skus(skus=skus_to_resolve, fields=["price", "description"])
-        not_found_skus = getattr(prod_res, "not_found_skus", [])
+        not_found_skus = list(getattr(prod_res, "not_found_skus", []) or [])
         for p in prod_res.products:
             clean_sku = str(p.sku).strip()
             resolved_skus_map[clean_sku] = p
@@ -542,7 +550,15 @@ async def odoo_update_quotation(
         if clean_name:
             existing_by_name.setdefault(clean_name, []).append(l)
 
-    items_clean = items or []
+    items_clean = []
+    for it in (items or []):
+        it_dict = dict(it)
+        if "sku" not in it_dict or not it_dict["sku"]:
+            it_dict["sku"] = it_dict.get("product_name") or it_dict.get("name") or ""
+        if "qty" not in it_dict:
+            it_dict["qty"] = it_dict.get("quantity") or it_dict.get("cantidad") or 1.0
+        items_clean.append(it_dict)
+
     skus_to_resolve = [str(it["sku"]).strip() for it in items_clean if not it.get("product_id") and it.get("sku")]
 
     resolved_skus_map = {}
@@ -841,13 +857,24 @@ async def odoo_view_quotation(
 
 
 async def odoo_confirm_order(
-    order_id: int,
+    order_id: Optional[int] = None,
+    order_name: Optional[str] = None,
     client: Optional[OdooClient] = None,
 ) -> Dict[str, Any]:
     """Confirma una cotización en borrador convirtiéndola en un pedido oficial de venta en Odoo (action_confirm)."""
     c = get_shared_odoo_client(client)
     if not getattr(c, "_uid", None):
         await c.authenticate()
+
+    if not order_id and order_name:
+        view_res = await odoo_view_quotation(order_name=order_name, client=c)
+        order_id = view_res.get("id")
+
+    if not order_id:
+        return {
+            "success": False,
+            "error": "No se identificó el ID o nombre de la cotización a confirmar en el sistema.",
+        }
 
     call_payload = {
         "jsonrpc": "2.0",
@@ -965,13 +992,24 @@ async def odoo_lock_order(
 
 
 async def odoo_remove_sale_order(
-    order_id: int,
+    order_id: Optional[int] = None,
+    order_name: Optional[str] = None,
     client: Optional[OdooClient] = None,
 ) -> Dict[str, Any]:
     """Cancela una orden o cotización en Odoo mediante action_cancel preservando la trazabilidad contable."""
     c = get_shared_odoo_client(client)
     if not getattr(c, "_uid", None):
         await c.authenticate()
+
+    if not order_id and order_name:
+        view_res = await odoo_view_quotation(order_name=order_name, client=c)
+        order_id = view_res.get("id")
+
+    if not order_id:
+        return {
+            "success": False,
+            "error": "No se identificó el ID o nombre de la orden a cancelar en el sistema.",
+        }
 
     call_payload = {
         "jsonrpc": "2.0",
