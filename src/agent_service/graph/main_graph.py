@@ -46,6 +46,10 @@ from src.agent_service.graph.sub_graphs.product_advisor.graph import (
     build_product_advisor_graph,
     get_product_advisor_graph,
 )
+from src.agent_service.graph.sub_graphs.sales_incentives.graph import (
+    build_sales_incentives_graph,
+    get_sales_incentives_graph,
+)
 
 from src.agent_service.soul import inject_soul, SoulRole
 from src.agent_service.core.guardrails import (
@@ -131,14 +135,19 @@ class MainGraphState(TypedDict, total=False):
     target_customer_name: Optional[str]
     target_order_name: Optional[str]
 
+    # Pasamanos de sales_incentives:
+    active_incentives: Optional[List[Dict[str, Any]]]
+    sales_trends: Optional[List[Dict[str, Any]]]
+    gap_info: Optional[Dict[str, Any]]
+
 
 # ==============================================================================
 # 2. ESQUEMA DEL ENRUTADOR
 # ==============================================================================
 class RouterDecision(BaseModel):
     """Clasificación estructurada de la consulta comercial."""
-    intent: Literal["advisor", "resolver", "general", "contact", "sales", "out_of_scope", "rag", "recommender"] = Field(
-        description="Intención comercial detectada: 'advisor', 'resolver', 'contact', 'sales', 'general' u 'out_of_scope'."
+    intent: Literal["advisor", "resolver", "general", "contact", "sales", "out_of_scope", "rag", "recommender", "incentives"] = Field(
+        description="Intención comercial detectada: 'advisor', 'resolver', 'contact', 'sales', 'incentives', 'general' u 'out_of_scope'."
     )
     reasoning: str = Field(description="Breve justificación de la decisión.")
 
@@ -303,7 +312,7 @@ def create_router_node(llm: BaseChatModel):
         )
 
         system_prompt = """
-            Clasifica la consulta del usuario en exactamente una de estas 6 intenciones comerciales:
+            Clasifica la consulta del usuario en exactamente una de estas 7 intenciones comerciales:
             1. 'advisor': Asesoría y catálogo comercial de productos (búsquedas, recomendaciones, sugerencias, rankings, existencias, ingredientes o presupuestos):
                - Búsqueda o existencia de productos (ej: 'dame todos los perfumes para hombre de Yanbal', '¿tienen labiales mate?', 'muéstrame opciones de cremas').
                - Recomendaciones o sugerencias generales o por categoría (ej: 'qué me recomiendas para la piel', 'los 3 mejores perfumes', 'opciones más baratas', 'me podrías decir 3 cremas').
@@ -312,8 +321,9 @@ def create_router_node(llm: BaseChatModel):
             2. 'resolver': Cotización directa o precios/stock con códigos SKU numéricos específicos (ej: 'precio del SKU 1', 'cotiza 3 del SKU 5').
             3. 'contact': Gestión de cartera de clientes comerciales (ej: 'mis clientes', 'agregar cliente Carlos').
             4. 'sales': Gestión de pedidos, órdenes y cotizaciones comerciales (ej: 'mis pedidos', 'confirmar orden SO001', 'detalle del pedido de Janet', 'cómo van las órdenes de Carlos', 'cotizar a cliente').
-            5. 'general': Saludos de cortesía, despedidas o preguntas sobre qué servicios puedes brindar.
-            6. 'out_of_scope': Solicitud ajena al negocio (poemas, chistes, código/programación, tareas escolares, ciencias, consejos personales).
+            5. 'incentives': Consulta de metas, avances de venta, comisiones, bonos, premios, escalas comerciales o planes de incentivos (ej: '¿cómo voy con mis metas?', '¿qué me falta para el bono?', '¿cuánto me falta para ganar la batidora o la tarjeta Visa?', '¿qué me conviene vender hoy para llegar al siguiente nivel de descuento?', 'planes de incentivos de Unique o Belcorp', 'mis comisiones').
+            6. 'general': Saludos de cortesía, despedidas o preguntas sobre qué servicios puedes brindar.
+            7. 'out_of_scope': Solicitud ajena al negocio (poemas, chistes, código/programación, tareas escolares, ciencias, consejos personales).
         """
 
         context_block = f"\nAntecedentes de memoria:\n{user_context}\n" if user_context else ""
@@ -431,6 +441,7 @@ def _route_after_router(state: MainGraphState) -> Literal[
     "product_resolver",
     "contact_manage",
     "sales_manage",
+    "sales_incentives",
     "guardrail_blocked",
 ]:
     """Enrutamiento condicional según la intención detectada."""
@@ -447,6 +458,8 @@ def _route_after_router(state: MainGraphState) -> Literal[
         return "contact_manage"
     elif intent == "sales":
         return "sales_manage"
+    elif intent in ("incentives", "sales_incentives"):
+        return "sales_incentives"
     return "general_chat"
 
 
@@ -456,6 +469,7 @@ def build_main_graph(
     contact_graph: Optional[Any] = None,
     sales_graph: Optional[Any] = None,
     advisor_graph: Optional[Any] = None,
+    incentives_graph: Optional[Any] = None,
     memory_store: Optional[UserMemoryStore] = None,
     checkpointer: Optional[BaseCheckpointSaver] = None,
     rag_graph: Optional[Any] = None,
@@ -493,6 +507,7 @@ def build_main_graph(
     )
     compiled_contact = contact_graph if contact_graph is not None else get_contact_manage_graph()
     compiled_sales = sales_graph if sales_graph is not None else get_sales_manage_graph()
+    compiled_incentives = incentives_graph if incentives_graph is not None else get_sales_incentives_graph()
 
     # Registro de nodos en el grafo
     workflow.add_node("input_guardrail", input_guardrail)
@@ -504,6 +519,7 @@ def build_main_graph(
     workflow.add_node("product_resolver", compiled_resolver)
     workflow.add_node("contact_manage", compiled_contact)
     workflow.add_node("sales_manage", compiled_sales)
+    workflow.add_node("sales_incentives", compiled_incentives)
     workflow.add_node("save_memory", save_memory_wrapper)
 
     # Flujo de ejecución:
@@ -531,6 +547,7 @@ def build_main_graph(
             "product_resolver": "product_resolver",
             "contact_manage": "contact_manage",
             "sales_manage": "sales_manage",
+            "sales_incentives": "sales_incentives",
             "guardrail_blocked": "guardrail_blocked",
         },
     )
@@ -542,6 +559,7 @@ def build_main_graph(
     workflow.add_edge("product_resolver", "save_memory")
     workflow.add_edge("contact_manage", END)
     workflow.add_edge("sales_manage", END)
+    workflow.add_edge("sales_incentives", END)
     workflow.add_edge("save_memory", END)
 
     resolved_checkpointer = checkpointer if checkpointer is not None else MemorySaver()

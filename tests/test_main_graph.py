@@ -592,3 +592,50 @@ async def test_main_graph_routes_to_product_advisor(mock_memory_store):
     assert result["intent"] == "advisor"
     assert "Aquí tienes los perfumes de Yanbal" in result["final_response"]
 
+
+@pytest.mark.asyncio
+async def test_build_main_graph_flow_incentives(mock_memory_store):
+    """Valida el enrutamiento y ejecución del subgrafo sales_incentives desde el main_graph."""
+    router_mock = MagicMock(spec=BaseChatModel)
+    router_mock.bind = MagicMock(return_value=router_mock)
+    router_mock.with_structured_output = MagicMock(return_value=router_mock)
+    router_mock.ainvoke = AsyncMock(return_value=RouterDecision(
+        intent="incentives",
+        reasoning="El vendedor consulta sobre sus metas e incentivos comerciales",
+    ))
+
+    builder_incentives = StateGraph(MainGraphState)
+    builder_incentives.add_node(
+        "incentives_exec",
+        lambda s: {
+            "final_response": "¡Vas genial! Estás a solo S/. 180.00 de alcanzar la escala del 30% de descuento en Unique.",
+        },
+    )
+    builder_incentives.add_edge(START, "incentives_exec")
+    builder_incentives.add_edge("incentives_exec", END)
+    dummy_incentives = builder_incentives.compile()
+
+    combined_llm = MagicMock(spec=BaseChatModel)
+    combined_llm.bind = MagicMock(side_effect=lambda **kw: router_mock)
+
+    app = build_main_graph(
+        llm=combined_llm,
+        incentives_graph=dummy_incentives,
+        memory_store=mock_memory_store,
+        checkpointer=MemorySaver(),
+    )
+
+    config = {"configurable": {"thread_id": "thread-incentives-routing"}}
+    result = await app.ainvoke(
+        {
+            "raw_query": "¿Cómo voy con mis metas comerciales y bonos?",
+            "user_id": 5,
+            "messages": [HumanMessage(content="¿Cómo voy con mis metas comerciales y bonos?")],
+        },
+        config=config,
+    )
+
+    assert result["intent"] == "incentives"
+    assert "escala del 30% de descuento" in result["final_response"]
+
+

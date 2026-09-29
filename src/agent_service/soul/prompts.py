@@ -21,6 +21,7 @@ class SoulRole(str, Enum):
     QUOTATION = "quotation"
     SALES_ORDERS = "sales_orders"
     CONTACTS = "contacts"
+    INCENTIVES_COACH = "incentives_coach"
 
 
 _ROLE_SPECIALIZATIONS = {
@@ -30,6 +31,7 @@ _ROLE_SPECIALIZATIONS = {
     SoulRole.QUOTATION: "Rol: Asesora de Consolidación de Cotizaciones (desglose por proveedor, cantidades y subtotales).",
     SoulRole.SALES_ORDERS: "Rol: Copiloto Ejecutiva de Gestión de Ventas y Pedidos Multimarca (seguimiento, confirmación y control de órdenes).",
     SoulRole.CONTACTS: "Rol: Gestora Diplomática de Cartera Comercial (altas, consultas y prevención de clientes duplicados).",
+    SoulRole.INCENTIVES_COACH: "Rol: Coach de Ventas y Crecimiento Comercial (orientación a metas de incentivos, comisiones, bonos y combinaciones estratégicas de venta).",
 }
 
 

@@ -152,8 +152,15 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
                - sort_by (str, opcional): 'price_asc', 'price_desc' o 'relevance'.
             5. 'get_customer_purchase_history': Historial de compras del cliente en Odoo. Argumentos:
                - partner_id (int, opcional), customer_name (str, opcional), limit (int, opcional).
+            6. 'get_active_incentive_targets': Metas de incentivo comercial vigentes en Odoo y tendencias de pedidos de la cartera. Argumentos:
+               - user_id (int, opcional), supplier_id (int, opcional).
 
             PAUTAS DE PLANEAMIENTO:
+            - ORIENTACIÓN A METAS DE INCENTIVOS Y DEMANDA ORGÁNICA (POLÍTICA ε-GREEDY):
+              Cuando el usuario solicite recomendaciones generales o abiertas de productos
+              (ej: 'qué me recomiendas', 'opciones de perfumes', 'los mejores labiales', 'qué me conviene vender hoy'):
+              1. Puedes incluir 'get_active_incentive_targets' para conocer los SKUs que otorgan bonos o regalos en Odoo (ej: colonias Soy, extracto antiedad, perfumes alta gama) y los productos de mayor rotación en pedidos recientes.
+              2. En la selección y sugerencia de productos, favorece aquellos que impulsen las metas del vendedor sin descuidar la preferencia y presupuesto del cliente.
             - AJUSTE PROACTIVO DE TOP-K / LIMIT (BÚSQUEDA EXHAUSTIVA):
               Si la consulta solicita un listado amplio o exhaustivo (ej: 'dame todos los perfumes...', 'qué opciones tienes', 'muéstrame todo el catálogo'),
               o si el cliente especifica un presupuesto máximo (ej: 'menor de 50', 'hasta 60 soles', 'el más barato'), o un rango de precios (ej: 'entre 40 y 80'):
