@@ -34,6 +34,10 @@ class ProductCatalogFilter(BaseModel):
         default=None,
         description="Filtro directo por edición o campaña de catálogo (ej: 'C10').",
     )
+    ediciones_activas: Optional[List[str]] = Field(
+        default=None,
+        description="Lista de últimas ediciones vigentes por proveedor para filtrado por defecto.",
+    )
     marca: Optional[str] = Field(
         default=None,
         description="Filtro directo por marca comercial (ej: 'Yanbal', 'Ésika').",
@@ -188,6 +192,10 @@ class SearchProductCatalogInput(BaseModel):
         default=None,
         description="Campaña o edición de catálogo (ej: 'C10').",
     )
+    ediciones_activas: Optional[List[str]] = Field(
+        default=None,
+        description="Lista de últimas ediciones vigentes por proveedor para filtrado por defecto.",
+    )
     limit: Optional[int] = Field(
         default=8,
         description="Cantidad máxima de candidatos a recuperar.",
@@ -282,3 +290,33 @@ class CustomerPurchaseHistoryInput(BaseModel):
     )
 
 
+
+class RerankAndFilterInput(BaseModel):
+    candidates: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="Lista de productos candidatos a clasificar, reordenar y filtrar.",
+    )
+    context_query: Optional[str] = Field(
+        default=None,
+        description="Consulta contextual de la intención del cliente (ej: 'crema facial económica para 50 años').",
+    )
+    target_item_count: Optional[int] = Field(
+        default=None,
+        description="Cantidad máxima de productos a devolver (corte Top-K).",
+    )
+    feedback: Optional[str] = Field(
+        default=None,
+        description="Crítica semántica en lenguaje natural o directriz correctiva de la rúbrica.",
+    )
+    sort_by: Optional[str] = Field(
+        default="relevance",
+        description="Criterio de orden: 'relevance', 'price_asc' o 'price_desc'.",
+    )
+    user_id: Optional[int] = Field(
+        default=None,
+        description="ID del vendedor CRM.",
+    )
+    intent_spec: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Perfil de intención estructurado si está disponible.",
+    )

@@ -12,6 +12,7 @@ services:
       - HF_HOME=/root/.cache/huggingface
       - SENTENCE_TRANSFORMERS_HOME=/root/.cache/huggingface
       - EMBEDDING_CACHE_DIR=/root/.cache/huggingface
+      - WHISPER_SERVER_URL=http://whisper_server:9000
     volumes:
       - .:/app
       - embedding_cache:/root/.cache/huggingface
@@ -24,6 +25,7 @@ services:
       start_interval: 10s
     networks:
       - traefik-net
+      - whisper-net
     labels:
       - "traefik.enable=true"
       - "traefik.docker.network=traefik-net"
@@ -34,10 +36,32 @@ services:
       - "traefik.http.routers.spark_agent_qa.service=spark-agent-qa-service"
       - "traefik.http.services.spark-agent-qa-service.loadbalancer.server.port=8000"
 
+  # ── Servidor whisper.cpp — solo red interna, sin puerto expuesto ──
+  whisper:
+    image: ghcr.io/ggerganov/whisper.cpp:main
+    container_name: whisper_server
+    volumes:
+      - whisper_models:/models
+      - ./scripts/whisper-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    networks:
+      - whisper-net
+    restart: unless-stopped
+
 networks:
   traefik-net:
     external: true
+  whisper-net:
+    name: spark_agent_whisper_net
 
 volumes:
   embedding_cache:
     name: spark_agent_embedding_cache
+  whisper_models:
+    name: spark_agent_whisper_models

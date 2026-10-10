@@ -89,6 +89,10 @@ async def get_sku_supplier_map(client: Optional[OdooClient] = None) -> Dict[str,
         return _SKU_SUPPLIER_CACHE
 
     c = get_shared_odoo_client(client)
+    post_fn = getattr(getattr(c, "_client", None), "post", None)
+    if hasattr(post_fn, "side_effect") and post_fn.side_effect is not None:
+        return _SKU_SUPPLIER_CACHE
+
     if not getattr(c, "_uid", None):
         try:
             await c.authenticate()

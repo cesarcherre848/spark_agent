@@ -1,10 +1,10 @@
 from typing import List, Dict, Any, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class ExtractedSKUItem(BaseModel):
     sku: str = Field(
-        description="Código SKU exacto o referencia interna del producto (ej: '1', '11', 'SKU-101')."
+        description="Código comercial SKU o código de referencia del producto (ej: '20013876', '47000', '20010996')."
     )
     attributes: Dict[str, Any] = Field(
         default_factory=dict,
@@ -14,6 +14,23 @@ class ExtractedSKUItem(BaseModel):
         default=None,
         description="Nombre del proveedor o partner solicitado para este SKU, si fue mencionado por el usuario.",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_sku_fields(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "sku" not in data or not data["sku"]:
+                candidate = (
+                    data.get("code")
+                    or data.get("codigo")
+                    or data.get("product_sku")
+                    or data.get("reference")
+                    or data.get("product_name")
+                    or data.get("name")
+                    or ""
+                )
+                data["sku"] = str(candidate).strip()
+        return data
 
 
 class ExtractionResult(BaseModel):

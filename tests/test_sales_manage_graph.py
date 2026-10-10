@@ -718,3 +718,74 @@ async def test_sales_manage_hybrid_add_items_fast_path(
     mock_list_current_orders_tool.assert_not_awaited()
     assert "S00003" in res.get("final_response", "")
 
+
+@pytest.mark.asyncio
+async def test_consecutive_customer_switching_resets_partner_id(
+    mock_llm,
+    mock_list_orders_tool,
+    mock_list_current_orders_tool,
+    mock_create_quotation_tool,
+    mock_update_quotation_tool,
+    mock_view_quotation_tool,
+    mock_confirm_order_tool,
+    mock_unlock_order_tool,
+    mock_update_order_tool,
+    mock_lock_order_tool,
+    mock_remove_order_tool,
+    mock_list_customers_tool,
+    mock_upsert_customer_tool,
+):
+    """Valida que al cambiar de cliente en turnos consecutivos, partner_id previo no contamine la nueva orden."""
+    mock_list_customers_tool.side_effect = [
+        [{"id": 31, "name": "Dika"}],    # Turn 1: busca Dika -> ID 31
+        [{"id": 32, "name": "Renzo"}],   # Turn 2: busca Renzo -> ID 32
+    ]
+    mock_create_quotation_tool.side_effect = [
+        {"success": True, "action": "created", "order_id": 15, "name": "S00015", "partner_id": 31, "customer_name": "Dika", "amount_total": 471.5},
+        {"success": True, "action": "created", "order_id": 16, "name": "S00016", "partner_id": 32, "customer_name": "Renzo", "amount_total": 264.5},
+    ]
+
+    mock_llm.ainvoke.side_effect = [
+        SalesExtractionResult(action="upsert", customer="Dika", items=[SalesSKUItem(sku="750", qty=1.0)]),
+        SalesSynthesizeResponse(response_text="Orden S00015 creada para Dika."),
+        SalesExtractionResult(action="upsert", customer="Renzo", items=[SalesSKUItem(sku="2037", qty=1.0)]),
+        SalesSynthesizeResponse(response_text="Orden S00016 creada para Renzo."),
+    ]
+
+    graph = build_sales_manage_graph(
+        llm=mock_llm,
+        list_orders_tool=mock_list_orders_tool,
+        list_current_orders_tool=mock_list_current_orders_tool,
+        create_quotation_tool=mock_create_quotation_tool,
+        update_quotation_tool=mock_update_quotation_tool,
+        view_quotation_tool=mock_view_quotation_tool,
+        confirm_order_tool=mock_confirm_order_tool,
+        unlock_order_tool=mock_unlock_order_tool,
+        update_order_tool=mock_update_order_tool,
+        lock_order_tool=mock_lock_order_tool,
+        remove_order_tool=mock_remove_order_tool,
+        list_customers_tool=mock_list_customers_tool,
+        upsert_customer_tool=mock_upsert_customer_tool,
+        checkpointer=MemorySaver(),
+    )
+
+    cfg = {"configurable": {"thread_id": "test-multi-client-consecutive"}}
+    
+    # Turn 1: Dika
+    res1 = await graph.ainvoke({"raw_query": "crear pedido para Dika con sku 750", "user_id": 8}, config=cfg)
+    assert res1.get("customer_name") == "Dika"
+    assert res1.get("partner_id") == 31
+    assert mock_create_quotation_tool.call_args_list[0].kwargs.get("customer_name") == "Dika"
+    assert mock_create_quotation_tool.call_args_list[0].kwargs.get("partner_id") == 31
+
+    # Turn 2: Renzo
+    res2 = await graph.ainvoke({"raw_query": "ahora crear pedido para Renzo con sku 2037", "user_id": 8}, config=cfg)
+    assert res2.get("customer_name") == "Renzo"
+    assert res2.get("partner_id") == 32
+    assert mock_create_quotation_tool.call_args_list[1].kwargs.get("customer_name") == "Renzo"
+    assert mock_create_quotation_tool.call_args_list[1].kwargs.get("partner_id") == 32
+    # Verify session_orders contains both
+    assert "dika" in res2.get("session_orders", {})
+    assert "renzo" in res2.get("session_orders", {})
+
+

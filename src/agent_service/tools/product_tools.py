@@ -1,8 +1,10 @@
+import re
 from typing import List, Optional, Dict, Any, Union
 from collections import defaultdict
 from langchain_core.tools import tool
 from psycopg_pool import AsyncConnectionPool
 
+from src.agent_service.core.stores.product.product_hierarchy import extract_base_concept_name
 from src.agent_service.core.stores.product.schemas import (
     ProductAttribute,
     GetProductBySkusInput,
@@ -17,6 +19,7 @@ from src.agent_service.core.stores.product.schemas import (
     SearchProductCatalogInput,
     GetCrossSellRecommendationsInput,
     FilterAndSortProductsInput,
+    RerankAndFilterInput,
     CustomerPurchaseHistoryInput,
 )
 from src.agent_service.core.stores.product.odoo_client import OdooClient
@@ -192,6 +195,7 @@ def create_search_product_catalog_tool(vector_store: Optional[ProductVectorStore
         marca: Optional[str] = None,
         pagina: Optional[int] = None,
         edicion: Optional[str] = None,
+        ediciones_activas: Optional[List[str]] = None,
         limit: Optional[int] = 8,
         user_id: Optional[int] = None,
         vendor_id: Optional[int] = None,
@@ -210,11 +214,12 @@ def create_search_product_catalog_tool(vector_store: Optional[ProductVectorStore
                 user_id=user_id,
                 pagina=pagina,
                 edicion=edicion,
+                ediciones_activas=ediciones_activas,
                 marca=marca,
                 vendor_id=vendor_id,
                 vendor_name=vendor_name,
             )
-            if (user_id is not None or any(x is not None for x in [pagina, edicion, marca, vendor_id, vendor_name]))
+            if (user_id is not None or any(x is not None for x in [pagina, edicion, ediciones_activas, marca, vendor_id, vendor_name]))
             else None
         )
 
@@ -224,20 +229,41 @@ def create_search_product_catalog_tool(vector_store: Optional[ProductVectorStore
             filters=catalog_filter,
         )
 
+        from src.agent_service.core.stores.product.catalog_resolver import get_vendor_catalog_resolver
+        catalog_resolver = get_vendor_catalog_resolver()
+
         results = []
         for doc in docs:
             meta = doc.metadata or {}
+            p_name = meta.get("name") or "Producto sin nombre"
+            p_edicion = meta.get("edicion")
+            
+            # Consultar si el producto tiene historial o variación frente a edición previa
+            price_variation = None
+            try:
+                # El precio se obtiene del metadata o de la primera aproximación
+                raw_price = meta.get("price") or meta.get("list_price")
+                if raw_price is not None:
+                    price_variation = await catalog_resolver.get_price_variation_history(
+                        product_name=p_name,
+                        current_price=float(raw_price),
+                        current_edition=p_edicion,
+                    )
+            except Exception:
+                price_variation = None
+
             results.append({
                 "product_id": meta.get("product_id"),
                 "sku": meta.get("sku"),
-                "name": meta.get("name") or "Producto sin nombre",
+                "name": p_name,
                 "description": doc.page_content,
                 "pagina": meta.get("pagina"),
-                "edicion": meta.get("edicion"),
+                "edicion": p_edicion,
                 "marca": meta.get("marca"),
                 "vendor_id": meta.get("vendor_id"),
                 "vendor_name": meta.get("vendor_name"),
                 "rrf_score": meta.get("rrf_score"),
+                "price_variation": price_variation,
             })
         return results
 
@@ -398,6 +424,268 @@ def create_filter_and_sort_products_tool():
     return filter_and_sort_products_tool
 
 
+def create_rerank_and_filter_candidates_tool():
+    """Fábrica de la herramienta contextual rerank_and_filter_candidates con soporte de feedback semántico e intent_spec."""
+    @tool("rerank_and_filter_candidates", args_schema=RerankAndFilterInput)
+    def rerank_and_filter_candidates_tool(
+        candidates: List[Dict[str, Any]],
+        context_query: Optional[str] = None,
+        target_item_count: Optional[int] = None,
+        feedback: Optional[str] = None,
+        sort_by: Optional[str] = "relevance",
+        user_id: Optional[int] = None,
+        intent_spec: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Reordena, filtra y depura candidatos aplicando discriminación anatómica, demográfica y de género,
+        asimilación de feedback semántico (crítica de la rúbrica) y corte dinámico Top-K."""
+        items = list(candidates or [])
+        if not items:
+            return []
+
+        ctx_str = f"{context_query or ''} {feedback or ''}".lower()
+        spec = intent_spec or {}
+
+        # 1. Extracción semántica de perfiles desde intent_spec con fallback al contexto
+        target_gender = spec.get("target_gender")
+        if not target_gender:
+            if any(w in ctx_str for w in ["mujer", "femenin", "dama", "para ella"]):
+                target_gender = "female"
+            elif any(w in ctx_str for w in ["hombre", "masculin", "caballero", "para él"]):
+                target_gender = "male"
+
+        # Inferencia natural de edad: a partir de target_age numérico o contexto conversacional
+        target_age = spec.get("target_age")
+        if target_age is None:
+            age_match = re.search(r"\b(\d{1,2})\s*(?:años|anos|de edad)\b", ctx_str)
+            if not age_match:
+                age_match = re.search(r"\b(?:tiene|edad(?:\s*de)?)\s*(\d{1,2})\b", ctx_str)
+            if age_match:
+                try:
+                    target_age = int(age_match.group(1))
+                except (ValueError, TypeError):
+                    pass
+
+        target_age_group = spec.get("target_age_group")
+        # Inferencia dinámica de etapa de vida basada en edad numérica
+        if target_age is not None:
+            if target_age >= 45:
+                target_age_group = "mature"
+            elif 25 <= target_age < 45:
+                target_age_group = "adult"
+            elif 13 <= target_age < 25:
+                target_age_group = "teen_young"
+            else:
+                target_age_group = "kids"
+        elif not target_age_group:
+            if any(w in ctx_str for w in ["madura", "piel madura", "adulta mayor", "señora"]):
+                target_age_group = "mature"
+            elif any(w in ctx_str for w in ["joven", "chico joven", "chica joven", "adolescente", "teen", "juvenil"]):
+                target_age_group = "teen_young"
+            elif any(w in ctx_str for w in ["niña", "niño", "bebe", "bebé", "infantil", "kids"]):
+                target_age_group = "kids"
+
+        is_mature = (target_age_group == "mature") or (target_age is not None and target_age >= 45)
+        is_adult = is_mature or (target_age_group == "adult") or (target_age is not None and target_age >= 25)
+        is_teen = (target_age_group == "teen_young") or (target_age is not None and 13 <= target_age < 25)
+
+        anatomical_focus = spec.get("anatomical_focus")
+        is_facial_focus = (anatomical_focus in ["facial", "face", "rostro"]) or any(
+            w in ctx_str for w in ["rostro", "facial", "cutis", "cara", "antiarrugas", "ojos"]
+        )
+        is_fragrance_focus = (anatomical_focus in ["fragrance", "fragancia", "perfume", "colonia"]) or any(
+            w in ctx_str for w in ["colonia", "perfume", "fragancia", "eau de", "aroma"]
+        )
+
+        preferred_brands = [str(b).strip().lower() for b in spec.get("preferred_brands") or []]
+        excluded_brands = [str(b).strip().lower() for b in spec.get("excluded_brands") or []]
+        excluded_profiles = [str(p).strip().lower() for p in spec.get("excluded_profiles") or []]
+
+        excluded_targets = set(spec.get("excluded_targets") or [])
+        if is_mature:
+            excluded_targets.add("juvenil_teen")
+            excluded_targets.add("kids")
+        elif is_adult:
+            excluded_targets.add("kids")
+
+        is_economy_focus = any(
+            w in ctx_str for w in ["económic", "economico", "barat", "menor precio", "menos precio", "aún más económico", "aun mas economico"]
+        ) or bool(spec.get("max_price"))
+
+        # Detección de límite de precio explícito en spec, feedback o contexto
+        max_price_limit = spec.get("max_price")
+        if max_price_limit is None:
+            price_match = re.search(r"(?:menor|menos|<)\s*(?:a\s*)?(?:s\/\.?\s*)?(\d+(?:\.\d+)?)", ctx_str)
+            if price_match:
+                try:
+                    max_price_limit = float(price_match.group(1))
+                except (ValueError, TypeError):
+                    pass
+
+        # Detección de SKUs a excluir en feedback
+        excluded_skus = set()
+        if feedback:
+            f_lower = feedback.lower()
+            if "excluir" in f_lower or "rechazar" in f_lower or "no recomendar" in f_lower:
+                for match in re.finditer(r"\b([0-9]{2,8})\b", feedback):
+                    excluded_skus.add(match.group(1))
+
+        # Descriptores de concepto etario universal (conceptos taxonómicos puros, sin submarcas ni nombres comerciales)
+        concept_teen_descriptors = [
+            "escarcha", "brillantina", "golosina", "chicle", "para adolescentes",
+            "adolescente", "juvenil", "chicas jóvenes", "teen"
+        ]
+        concept_kids_descriptors = [
+            "infantil", "para niñas", "para niños", "colonia niñas", "colonia niños",
+            "kids", "baby", "para bebés", "pediátrico", "pediatrico"
+        ]
+
+        # Tokens significativos de la consulta para match semántico (ej: 'trigueña', 'bronzage', etc.)
+        stop_words = {
+            "para", "con", "de", "la", "el", "los", "las", "un", "una", "unos", "unas",
+            "que", "en", "por", "y", "o", "a", "al", "del", "mi", "mis", "tu", "tus",
+            "su", "sus", "se", "lo", "le", "les", "me", "nos", "te", "es", "son",
+            "tono", "ideal", "clienta", "cliente", "señora", "chico", "chica", "quien", "cual"
+        }
+        query_tokens = [w for w in re.findall(r"\b\w{3,}\b", ctx_str) if w not in stop_words]
+
+        filtered = []
+        for p in items:
+            sku = str(p.get("sku") or p.get("default_code") or "").strip()
+            name = str(p.get("name") or "").lower()
+            desc = str(p.get("description") or p.get("description_sale") or "").lower()
+            p_brand = str(p.get("marca") or "").strip().lower()
+            p_price = p.get("price")
+            p_text = f"{name} {desc}"
+
+            # A. Exclusión de SKUs explícitos
+            if sku and sku in excluded_skus:
+                continue
+
+            # B. Gatekeeper de marcas (preferred y excluded)
+            if excluded_brands and any(eb in p_brand or p_brand in eb for eb in excluded_brands if eb):
+                continue
+            if preferred_brands and not any(pb in p_brand or p_brand in pb for pb in preferred_brands if pb):
+                continue
+
+            # C. Exclusión por perfiles anatómicos o funcionales excluidos
+            if excluded_profiles and any(ep in p_text for ep in excluded_profiles if ep):
+                continue
+
+            # D. Gatekeeper anatómico genérico: Si es foco facial, descartar cremas corporales, de manos y capilares
+            if is_facial_focus:
+                if any(w in p_text for w in [
+                    "crema corporal", "loción corporal", "locion corporal", "para el cuerpo",
+                    "hidratante corporal", "manos y cuerpo", "crema de manos", "para manos",
+                    "manos resecas", "moldeadora de rizos", "shampoo", "acondicionador"
+                ]):
+                    if not any(fw in name for fw in ["facial", "rostro", "cutis", "antiarrugas"]):
+                        continue
+
+            # E. Gatekeeper de género
+            if target_gender == "female":
+                if any(w in p_text for w in ["para hombre", "hombre", "masculino", "eau de parfum hombre", "eau de toilette hombre"]):
+                    continue
+            elif target_gender == "male":
+                if any(w in p_text for w in ["para mujer", "femenina", "dama", "eau de parfum mujer", "eau de toilette mujer"]):
+                    continue
+
+            # F. Gatekeeper demográfico de edad conceptual (Descartar infantil y juvenil cuando el target es adulto maduro)
+            if "kids" in excluded_targets or is_adult:
+                if any(kd in p_text for kd in concept_kids_descriptors):
+                    continue
+
+            if "juvenil_teen" in excluded_targets or is_mature:
+                if is_fragrance_focus:
+                    if any(jd in p_text for jd in concept_teen_descriptors):
+                        continue
+
+            # G. Límite de precio si fue detectado explícitamente
+            if max_price_limit is not None and p_price is not None:
+                try:
+                    if float(p_price) > max_price_limit:
+                        continue
+                except (ValueError, TypeError):
+                    pass
+
+            filtered.append(p)
+
+        # Si el filtro fue demasiado estricto y vació todo, recuperar items originales como respaldo
+        if not filtered and items:
+            filtered = list(items)
+
+        # 2. Scoring y Reordenamiento Dinámico
+        def calculate_item_score(item: Dict[str, Any]) -> float:
+            score = 50.0
+            p_price = item.get("price")
+            name = str(item.get("name") or "").lower()
+            desc = str(item.get("description") or "").lower()
+            combined = f"{name} {desc}"
+
+            # Sensibilidad a precio
+            if p_price is not None:
+                try:
+                    val = float(p_price)
+                    if is_economy_focus:
+                        score += max(0.0, (150.0 - val))
+                    else:
+                        score += 10.0
+                except (ValueError, TypeError):
+                    pass
+
+            # Afinidad semántica con tokens significativos de la consulta
+            matched_tokens_count = sum(1 for tok in query_tokens if tok in combined)
+            if matched_tokens_count > 0:
+                score += (matched_tokens_count * 15.0)
+
+            # Afinidad dermatológica y de estilo inferida para adultos maduros (edad >= 45 o mature)
+            if is_mature:
+                # Facial: descriptores funcionales dermatológicos universales
+                if any(w in combined for w in ["antiarrugas", "antiedad", "lifting", "firmeza", "regeneradora", "resveratrol", "nutritiva", "madura"]):
+                    score += 30.0
+                # Fragancias: descriptores conceptuales universales de estilo clásico, fresco y elegante
+                if any(w in combined for w in ["elegante", "clasic", "clásic", "fresca", "floral", "suave", "diario", "delicada", "sobria"]):
+                    score += 20.0
+            elif is_teen:
+                if any(jd in combined for jd in concept_teen_descriptors):
+                    score += 20.0
+
+            # Afinidad para piel mixta/grasa
+            if any(w in ctx_str for w in ["mixta", "grasa", "sebo", "brillo", "matificante"]):
+                if any(w in combined for w in ["matificante", "control de grasa", "sin brillo", "ligera", "oil control"]):
+                    score += 20.0
+
+            # Penalización si no tiene precio asignado
+            if p_price is None:
+                score -= 15.0
+
+            return score
+
+        if sort_by == "price_asc":
+            filtered.sort(key=lambda x: (x.get("price") is None, float(x.get("price") or 999999.0), -calculate_item_score(x)))
+        elif sort_by == "price_desc":
+            filtered.sort(key=lambda x: (x.get("price") is None, -float(x.get("price") or 0.0)))
+        else:
+            filtered.sort(key=calculate_item_score, reverse=True)
+
+        # 3. Deduplicación por concepto canónico preservando la mejor variante
+        deduped = []
+        seen_concepts = set()
+        for it in filtered:
+            c_name = extract_base_concept_name(it.get("name") or "")
+            if c_name not in seen_concepts:
+                seen_concepts.add(c_name)
+                deduped.append(it)
+            elif target_item_count and len(deduped) < target_item_count:
+                deduped.append(it)
+
+        # 4. Truncado dinámico (Top-K)
+        limit_k = target_item_count if (target_item_count and target_item_count > 0) else 4
+        return deduped[:limit_k]
+
+    return rerank_and_filter_candidates_tool
+
+
+
 def create_get_customer_purchase_history_tool(odoo_client: Optional[OdooClient] = None):
     """Fábrica de la herramienta get_customer_purchase_history conectada a sale.order de Odoo."""
     client = odoo_client
@@ -473,5 +761,6 @@ validate_product_ownership = create_validate_product_ownership_tool()
 search_product_catalog = create_search_product_catalog_tool()
 get_cross_sell_recommendations = create_get_cross_sell_recommendations_tool()
 filter_and_sort_products = create_filter_and_sort_products_tool()
+rerank_and_filter_candidates = create_rerank_and_filter_candidates_tool()
 get_customer_purchase_history = create_get_customer_purchase_history_tool()
 

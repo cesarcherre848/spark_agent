@@ -35,7 +35,11 @@ _HYBRID_QUERY_SQL = """
           AND (%(user_id)s::integer IS NULL OR vuap.user_id IS NOT NULL)
           AND (%(vendor_id)s::integer IS NULL OR vuap.vendor_id = %(vendor_id)s::integer)
           AND (%(pagina)s::integer IS NULL OR vuap.pagina = %(pagina)s::integer)
-          AND (%(edicion)s::text IS NULL OR lower(vuap.edicion) = lower(%(edicion)s::text))
+          AND (
+              (%(edicion)s::text IS NOT NULL AND lower(vuap.edicion) = lower(%(edicion)s::text))
+              OR (%(edicion)s::text IS NULL AND %(ediciones_activas)s::text[] IS NOT NULL AND vuap.edicion = ANY(%(ediciones_activas)s::text[]))
+              OR (%(edicion)s::text IS NULL AND %(ediciones_activas)s::text[] IS NULL)
+          )
           AND (
               %(marca)s::text IS NULL 
               OR lower(vuap.marca) = lower(%(marca)s::text)
@@ -53,7 +57,11 @@ _HYBRID_QUERY_SQL = """
             ROW_NUMBER() OVER (
                 ORDER BY ts_rank_cd(
                     to_tsvector('spanish', COALESCE(emb.name, '') || ' ' || COALESCE(emb.source_text, '')),
-                    websearch_to_tsquery('spanish', %(query_text)s)
+                    CASE 
+                        WHEN to_tsvector('spanish', COALESCE(emb.name, '') || ' ' || COALESCE(emb.source_text, '')) @@ websearch_to_tsquery('spanish', %(query_text)s)
+                        THEN websearch_to_tsquery('spanish', %(query_text)s)
+                        ELSE to_tsquery('spanish', %(lexical_tsquery)s)
+                    END
                 ) DESC
             ) AS rank_lex
         FROM {table_name} emb
@@ -64,7 +72,11 @@ _HYBRID_QUERY_SQL = """
           AND (%(user_id)s::integer IS NULL OR vuap.user_id IS NOT NULL)
           AND (%(vendor_id)s::integer IS NULL OR vuap.vendor_id = %(vendor_id)s::integer)
           AND (%(pagina)s::integer IS NULL OR vuap.pagina = %(pagina)s::integer)
-          AND (%(edicion)s::text IS NULL OR lower(vuap.edicion) = lower(%(edicion)s::text))
+          AND (
+              (%(edicion)s::text IS NOT NULL AND lower(vuap.edicion) = lower(%(edicion)s::text))
+              OR (%(edicion)s::text IS NULL AND %(ediciones_activas)s::text[] IS NOT NULL AND vuap.edicion = ANY(%(ediciones_activas)s::text[]))
+              OR (%(edicion)s::text IS NULL AND %(ediciones_activas)s::text[] IS NULL)
+          )
           AND (
               %(marca)s::text IS NULL 
               OR lower(vuap.marca) = lower(%(marca)s::text)
@@ -73,8 +85,10 @@ _HYBRID_QUERY_SQL = """
           )
           AND emb.ai_provider = %(ai_provider)s
           AND emb.ai_model = %(ai_model)s
-          AND to_tsvector('spanish', COALESCE(emb.name, '') || ' ' || COALESCE(emb.source_text, '')) 
-              @@ websearch_to_tsquery('spanish', %(query_text)s)
+          AND (
+              to_tsvector('spanish', COALESCE(emb.name, '') || ' ' || COALESCE(emb.source_text, '')) @@ websearch_to_tsquery('spanish', %(query_text)s)
+              OR to_tsvector('spanish', COALESCE(emb.name, '') || ' ' || COALESCE(emb.source_text, '')) @@ to_tsquery('spanish', %(lexical_tsquery)s)
+          )
         LIMIT %(k_candidates)s
     ),
     fused_candidates AS (
@@ -125,6 +139,52 @@ _HYBRID_QUERY_SQL = """
 """
 
 
+def _build_lexical_tsquery(query: str) -> str:
+    """Construye una expresión tsquery en español usando raíces léxicas y disyunción (|)
+    para evitar que búsquedas largas o con adjetivos específicos se queden vacías."""
+    # Stopwords comunes en español y palabras vacías para catálogo
+    stopwords = {
+        "para", "como", "pero", "este", "esta", "estos", "estas", "cual", "quien", "donde",
+        "tengo", "necesito", "necesita", "busca", "busco", "quiero", "quiere", "recomienda",
+        "bueno", "buena", "mejor", "mejores", "unos", "unas", "sobre", "entre", "desde",
+        "hacia", "hasta", "anos", "años", "favor", "hola", "buenos", "dias", "tardes"
+    }
+    # Mapeo morfológico común para enriquecer raíces cosméticas/cuidado personal
+    morph_synonyms = {
+        "hidrat": ["hidrat", "ultrahidrat"],
+        "hidratante": ["hidrat", "ultrahidrat"],
+        "arruga": ["arrug", "antiarrug"],
+        "antiarruga": ["arrug", "antiarrug"],
+        "arrugas": ["arrug", "antiarrug"],
+        "antiarrugas": ["arrug", "antiarrug"],
+        "edad": ["edad", "arrug", "antiarrug", "antiedad"],
+        "antiedad": ["arrug", "antiarrug", "antiedad"],
+        "rostr": ["rostr", "facial"],
+        "rostro": ["rostr", "facial"],
+        "cara": ["rostr", "facial", "cara"],
+        "facial": ["rostr", "facial"],
+        "piel": ["piel", "cutis"],
+        "aclarante": ["aclar", "concha", "manch"],
+        "aclarar": ["aclar", "concha", "manch"],
+        "economica": ["crem", "accesible", "facial"],
+        "economico": ["crem", "accesible", "facial"],
+    }
+
+    clean_words = re.findall(r"[a-záéíóúñA-ZÁÉÍÓÚÑ0-9]+", (query or "").lower())
+    terms = set()
+    for w in clean_words:
+        if len(w) <= 2 or w in stopwords:
+            continue
+        terms.add(w)
+        for stem_key, expansions in morph_synonyms.items():
+            if stem_key in w or w.startswith(stem_key[:4]):
+                terms.update(expansions)
+
+    if not terms:
+        return "crema | facial | hidrat"
+    return " | ".join(sorted(terms))
+
+
 class ProductVectorStore(VectorStore):
     def __init__(
         self,
@@ -156,11 +216,12 @@ class ProductVectorStore(VectorStore):
         self,
         query: str,
         k: int = 5,
-        alpha: float = 0.7,
+        alpha: float = 0.55,
         filters: Optional[ProductCatalogFilter] = None,
     ) -> List[Document]:
         # Normalizar consulta a minúsculas y espacios limpios para evitar fragmentación de sub-tokens
         clean_query = " ".join((query or "").lower().split())
+        lexical_tsquery = _build_lexical_tsquery(clean_query)
 
         # Generar embedding o crear vector dummy con dimensión exacta si alpha == 0.0
         if alpha > 0.0:
@@ -180,6 +241,26 @@ class ProductVectorStore(VectorStore):
             if (filters and filters.edicion is not None)
             else (filters.metadata.edicion if (filters and filters.metadata) else None)
         )
+        target_ediciones_activas = (
+            filters.ediciones_activas
+            if (filters and getattr(filters, "ediciones_activas", None) is not None)
+            else None
+        )
+
+        # Si el usuario NO especificó una edición puntual ni una lista explícita,
+        # resolver dinámicamente las últimas campañas vigentes por proveedor
+        if target_edicion is None and target_ediciones_activas is None:
+            try:
+                from src.agent_service.core.stores.product.catalog_resolver import get_vendor_catalog_resolver
+                resolver = get_vendor_catalog_resolver()
+                target_ediciones_activas = await resolver.get_active_editions_for_user(
+                    user_id=target_user_id,
+                    vendor_id=target_vendor_id,
+                    marca=target_marca,
+                )
+            except Exception:
+                target_ediciones_activas = None
+
         raw_marca = (
             filters.marca
             if (filters and filters.marca is not None)
@@ -191,13 +272,15 @@ class ProductVectorStore(VectorStore):
         params: Dict[str, Any] = {
             "query_embedding": embedding_str,
             "query_text": clean_query,
+            "lexical_tsquery": lexical_tsquery,
             "user_id": target_user_id,
             "vendor_id": target_vendor_id,
             "pagina": target_pagina,
             "edicion": target_edicion,
+            "ediciones_activas": target_ediciones_activas if target_ediciones_activas else None,
             "marca": target_marca,
             "alpha": alpha,
-            "k_candidates": max(k * 4, 20),
+            "k_candidates": max(k * 8, 60),
             "k": k,
             "ai_provider": self._ai_provider,
             "ai_model": self._ai_model,

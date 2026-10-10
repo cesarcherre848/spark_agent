@@ -23,6 +23,14 @@ from src.agent_service.graph.sub_graphs.product_advisor.schemas import (
     format_products_for_advisor_prompt,
     FinalAnswer,
 )
+from src.agent_service.core.guardrails.sku_grounding import (
+    SKUGroundingValidator,
+    SKUFailSafeSanitizer,
+)
+from src.agent_service.core.stores.product.product_hierarchy import (
+    UniversalProductHierarchyResolver,
+    ProductCanonicalFamily,
+)
 from src.agent_service.graph.sub_graphs.product_advisor.tools import (
     build_advisor_tools_registry,
     invoke_advisor_tool,
@@ -54,6 +62,7 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
             vector_store=vector_store,
             odoo_client=odoo_client,
         )
+        self._hierarchy_resolver = UniversalProductHierarchyResolver()
 
         # Modelos estructurados
         self._planner = bind_structured_output(
@@ -76,14 +85,35 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
                     break
         raw_query = (raw_query or "").strip()
 
-        # Si no hay crítica previa activa, es un nuevo turno: reiniciar contador de iteración
+        # Gestión de estado multi-turno y ciclos de reflexión:
         critique = state.get("critique")
+        existing_candidates = state.get("candidate_products") or []
+        previous_skus = list(state.get("previous_turn_skus") or [])
+        previous_prices = dict(state.get("previous_turn_prices") or {})
+
         if not critique:
+            # Nuevo turno: reiniciar contador y purgar acumulación de candidatos antiguos
             iteration_count = 0
             remedy_suggestions = []
+            if existing_candidates:
+                # Extraer SKUs y precios de los productos recomendados o evaluados en el turno previo para delta audit
+                previous_skus = [
+                    str(p.get("sku")) for p in existing_candidates
+                    if p.get("sku")
+                ]
+                for p in existing_candidates:
+                    if p.get("sku") and p.get("price") is not None:
+                        try:
+                            previous_prices[str(p.get("sku"))] = float(p.get("price"))
+                        except (ValueError, TypeError):
+                            pass
+            candidate_products_cleaned = []
         else:
+            # Reflexión activa dentro del mismo turno: preservar estado
             iteration_count = state.get("iteration_count", 0)
             remedy_suggestions = state.get("suggested_improvements") or []
+            candidate_products_cleaned = existing_candidates
+
         partner_id = state.get("partner_id")
         customer_name = state.get("customer_name")
         user_id = state.get("user_id")
@@ -102,6 +132,12 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
             token_counter=len,
         )
 
+        prev_turn_info = ""
+        if previous_prices:
+            prev_turn_info = f"\n            PRODUCTOS PRESENTADOS EN EL TURNO ANTERIOR (Precios de referencia):\n" + "\n".join(
+                f"            - SKU [{sku}]: S/. {price:.2f}" for sku, price in list(previous_prices.items())[:5]
+            )
+
         system_prompt = f"""
             Eres el planificador experto de un Asesor de Productos y Catálogo Comercial.
             Tu misión es analizar la consulta del usuario y generar un plan estructurado (AdvisorPlan)
@@ -109,51 +145,53 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
 
             RESOLUCIÓN CONTEXTUAL Y MULTI-TURNO:
             - Si la consulta actual es una pregunta de seguimiento, aclaración, comparación o filtro de un diálogo anterior
-              (ej: 'de [Marca A] o de [Marca B] ?', '¿cuánto cuesta el segundo?', '¿tienes en color rojo?', '¿y colonias?'),
+              (ej: 'de [Marca A] o de [Marca B] ?', '¿cuánto cuesta el segundo?', '¿tienes en color rojo?', '¿y colonias?', 'algo aún más económico'),
               analízala OBLIGATORIAMENTE en conjunto con los turnos previos de la conversación.
-            - Propaga la categoría, tipo de producto o producto base discutido (ej: si antes hablaron de
-              'perfumes para mujer', y ahora dice 'de [Marca A] o de [Marca B] ?', la búsqueda debe ser de 'perfumes' o 'fragancias'
-              para cada marca indicada, NUNCA la frase genérica 'productos destacados').
+            - CAMBIO DE CRITERIO / PRECIO RELATIVO ('algo aún más económico', 'más barato', 'de menor precio'):
+              Si el usuario pide opciones más económicas respecto al turno previo, el objetivo de búsqueda y filtrado DEBE garantizar
+              encontrar productos cuyo precio sea estrictamente menor a las opciones ofrecidas anteriormente.{prev_turn_info}
             - PROPAGACIÓN OBLIGATORIA DE PÚBLICO OBJETIVO Y GÉNERO:
               Si en turnos previos el cliente especificó un público objetivo o género
               (ej: 'masculino', 'hombre', 'caballero', 'para él', 'femenino', 'mujer', 'dama', 'para ella', 'infantil', 'niños'),
-              debes PRESERVARLO Y PROPAGARLO OBLIGATORIAMENTE a cualquier consulta de seguimiento elíptica
-              (ej: si antes preguntó 'perfumes masculinos...' y ahora dice '¿y colonias?', la búsqueda
-              debe ser 'colonia hombre masculino eau de toilette fragancia fresca', NUNCA únicamente 'colonias').
-              Ten presente que en el catálogo comercial, las fragancias masculinas ligeras suelen denominarse
-              'Eau de Toilette' o 'Parfum', mientras que el término 'Colonia' aislado suele corresponder a líneas femeninas o infantiles.
-            - PREGUNTAS DE SEGUIMIENTO SOBRE PRODUCTOS PREVIOS ('esto a qué catálogo pertenece', '¿a qué campaña corresponde?', '¿cuánto cuesta ese?', '¿de qué marca son?', '¿tienen stock de esos?'):
-              Si la consulta hace referencia a los productos presentados en el turno inmediatamente anterior (usando palabras como 'esto', 'eso', 'aquello', 'estos', 'el primero', 'a qué catálogo pertenece', 'a qué campaña', 'de qué marca'):
-              1. NO ejecutes una búsqueda semántica genérica en catálogo (PROHIBIDO terminantemente planear query='catálogo campaña actual' o textos genéricos que mezclen otras marcas no relacionadas).
-              2. Identifica los códigos SKU o nombres de los productos recomendados en el turno anterior.
-              3. Invoca 'get_product_odoo_details' con dichos SKUs específicos para conocer sus detalles comerciales oficiales o preserva los productos del turno anterior.
+              debes PRESERVARLO Y PROPAGARLO OBLIGATORIAMENTE a cualquier consulta de seguimiento elíptica.
+            - EXTRACCIÓN ESTRUCTURADA DE PERFIL DE INTENCIÓN (intent_spec):
+              DEBES poblar el campo 'intent_spec' en tu plan con los datos inferidos de la consulta e historial:
+              * target_gender: 'female', 'male', 'unisex', o 'kids'.
+              * target_age: Edad numérica si se menciona o puede estimarse del texto (ej: 50, 32, 18, etc.).
+              * target_age_group: Etapa de vida inferida de la edad ('kids', 'teen_young', 'adult', 'mature'). Si edad >= 45 o 'madura', fija 'mature'.
+              * anatomical_focus: 'facial', 'body', 'hair', 'fragrance', o 'makeup'.
+              * product_profile: 'fresca_diario', 'citrica', 'antiarrugas', etc.
+              * excluded_targets: Si la persona es adulta o madura (edad >= 45), incluye ['juvenil_teen', 'kids'] para descartar fragancias de fantasía adolescente o infantil.
+            - DISCRIMINACIÓN ANATÓMICA ESTRICTA:
+              Si el diálogo trata sobre 'rostro', 'crema facial', 'antiarrugas', 'cutis', NUNCA mezcles cremas corporales, de manos o capilares.
+            - REGLA DE DESCONOCIMIENTO DE IDS INTERNOS: Los usuarios de negocio NO conocen ni utilizan IDs internos de base de datos (`product_id`, `partner_id`). Todo número o código de producto indicado por el cliente es SIEMPRE un SKU comercial (ej: 20013876, 47000).
 
-            HERRAMIENTAS DISPONIBLES:
+             HERRAMIENTAS DISPONIBLES:
             1. 'search_product_catalog': Búsqueda semántica híbrida en el catálogo. Argumentos:
-               - query (str): Términos clave del producto.
-               - marca (str, opcional): Marca comercial canónica consultada. Si el usuario solicita explícitamente una marca, pásala SIEMPRE aquí para filtrar únicamente sus productos.
-               - vendor_name (str, opcional): Nombre comercial del proveedor o partner si se especifica.
+               - query (str): Términos clave del producto (incluyendo líneas o sub-marcas como 'Totalist', 'Hidra', 'Triple Acción Max').
+               - marca (str, opcional): Casa comercial o marca principal matriz ÚNICAMENTE (ej: 'Yanbal', 'Ésika'). NO colocar nombres de líneas de producto aquí (ej: 'Totalist', 'Triple Acción' NO son marcas matrices, deben ir en 'query').
+               - vendor_name (str, opcional): Nombre comercial del proveedor o partner.
                - pagina (int, opcional): Número de página exacta en el catálogo.
                - edicion (str, opcional): Edición/campaña (ej: 'C10').
-               - limit (int, opcional): Cantidad máxima a recuperar (default 8).
+               - limit (int, opcional): Cantidad máxima a recuperar (default 8, usar 15 o 20 en búsquedas de economía o amplio surtido).
                - user_id (int, opcional): ID del vendedor CRM.
-            2. 'get_product_odoo_details': Consulta en tiempo real de precios, stock, moneda y UOM en Odoo. Argumentos:
+            2. 'rerank_and_filter_candidates': Reranker contextual y filtro dinámico inteligente. Argumentos:
+               - candidates (List[dict], opcional: se inyectan los recuperados si se omite).
+               - context_query (str): Intención completa de la consulta (ej: 'crema facial antiarrugas económica para mujer').
+               - target_item_count (int, opcional): Cantidad exacta de productos a devolver (ej: 2 si pide 2 cremas, 1 si pide 1 colonia).
+               - feedback (str, opcional): Crítica semántica o directriz correctiva.
+               - sort_by (str, opcional): 'price_asc', 'price_desc' o 'relevance'.
+            3. 'get_product_odoo_details': Consulta en tiempo real de precios, stock, moneda y UOM en Odoo. Argumentos:
                - skus (List[str]): Lista de códigos SKU a consultar.
                - fields (List[str], opcional): ['price', 'description', 'uom', 'category', 'taxes'].
-            3. 'get_cross_sell_recommendations': Recomendaciones complementarias o alternativas. Argumentos:
+            4. 'get_cross_sell_recommendations': Recomendaciones complementarias o alternativas. Argumentos:
                - base_sku (str, opcional): SKU base de referencia.
                - category (str, opcional): Categoría para sugerencias cruzadas.
                - marca (str, opcional): Marca preferida.
                - limit (int, opcional): Cantidad (default 5).
-            4. 'filter_and_sort_products': Filtro determinista por presupuesto, página y orden. Argumentos:
-               - products (List[dict]): Lista de productos a filtrar.
-               - min_price (float, opcional), max_price (float, opcional).
-               - marca (str, opcional), vendor_name (str, opcional), pagina (int, opcional), edicion (str, opcional).
-               - sort_by (str, opcional): 'price_asc', 'price_desc' o 'relevance'.
-            5. 'get_customer_purchase_history': Historial de compras del cliente en Odoo. Argumentos:
-               - partner_id (int, opcional), customer_name (str, opcional), limit (int, opcional).
-            6. 'get_active_incentive_targets': Metas de incentivo comercial vigentes en Odoo y tendencias de pedidos de la cartera. Argumentos:
-               - user_id (int, opcional), supplier_id (int, opcional).
+            5. 'filter_and_sort_products': Filtro determinista por presupuesto, página y orden.
+            6. 'get_customer_purchase_history': Historial de compras del cliente en Odoo.
+            7. 'get_active_incentive_targets': Metas de incentivo comercial vigentes en Odoo.
 
             PAUTAS DE PLANEAMIENTO:
             - ORIENTACIÓN A METAS DE INCENTIVOS Y DEMANDA ORGÁNICA (POLÍTICA ε-GREEDY):
@@ -163,19 +201,23 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
               2. En la selección y sugerencia de productos, favorece aquellos que impulsen las metas del vendedor sin descuidar la preferencia y presupuesto del cliente.
             - AJUSTE PROACTIVO DE TOP-K / LIMIT (BÚSQUEDA EXHAUSTIVA):
               Si la consulta solicita un listado amplio o exhaustivo (ej: 'dame todos los perfumes...', 'qué opciones tienes', 'muéstrame todo el catálogo'),
-              o si el cliente especifica un presupuesto máximo (ej: 'menor de 50', 'hasta 60 soles', 'el más barato'), o un rango de precios (ej: 'entre 40 y 80'):
+              o si el cliente especifica un presupuesto máximo (ej: 'menor de 50', 'hasta 60 soles', 'el más barato'), o un rango de precios (ej: 'entre 40 y 80'), o pide 'algo más económico':
               DEBES fijar proactivamente 'limit=15' o 'limit=20' en 'search_product_catalog' (en lugar del default de 8) para realizar una búsqueda exhaustiva
               que explore todos los escalones de precios del catálogo.
-              Si el presupuesto solicitado es bajo (ej: < S/. 50 o < S/. 80), expande los términos de búsqueda a categorías afines accesibles
-              (ej: query='perfume colonia fragancia corporal masculina hombre', limit=20) seguido de 'filter_and_sort_products'.
+            - FLUJO RECOMENDADO: Siempre que se realice una búsqueda semántica ('search_product_catalog') para recomendar productos,
+              es altamente recomendable planear a continuación 'rerank_and_filter_candidates' con el context_query adecuado y
+              sort_by='price_asc' si el usuario busca economía o target_item_count según los ítems deseados.
+            - Si el usuario busca opciones económicas o pide 'algo más económico', planea 'search_product_catalog' con limit=15 o 20
+              seguido de 'rerank_and_filter_candidates' con context_query detallado y sort_by='price_asc'.
             - Si el usuario pide recomendaciones personalizadas ("según lo que suelo comprar", "¿qué me sugieres?"),
               invoca 'get_customer_purchase_history' para conocer sus preferencias antes de buscar en el catálogo.
-            - Si el usuario pide un producto puntual o menciona marcas, páginas o campañas ("labial de [Marca] pág 12"),
-              invoca 'search_product_catalog' extrayendo los metadatos correspondientes (restringiendo a dicha marca si fue solicitada).
+            - Si el usuario pide un producto puntual, línea de producto o menciona marcas matriz ("crema Totalist", "labial de Yanbal", "Ésika pág 12"),
+              invoca 'search_product_catalog' asegurándote de incluir el nombre de la línea en 'query' y restringir 'marca' solo si es una casa matriz (Yanbal, Ésika).
+            - FILTRO DE CAMPAÑA POR DEFECTO (ÚLTIMA CAMPAÑA VIGENTE):
+              El catálogo busca por defecto en la ÚLTIMA CAMPAÑA VIGENTE de cada proveedor (ej: C11 para Yanbal, C-15 para Ésika).
+              Por lo tanto, deja 'edicion=None' en 'search_product_catalog' a menos que el usuario pida EXPLÍCITAMENTE una campaña o catálogo anterior (ej: 'en la C10', 'en el catálogo pasado').
             - Si el usuario pide comparar marcas explícitamente ("compara [Marca A] y [Marca B]"), planea búsquedas específicas
               para cada marca y consolida las opciones.
-            - Si el usuario especifica un presupuesto máximo o pide "el más barato", planea 'search_product_catalog'
-              con limit=15 o 20 seguido de 'filter_and_sort_products'.
             - Si el usuario busca productos complementarios a uno ya seleccionado, usa 'get_cross_sell_recommendations'.
         """
 
@@ -189,8 +231,7 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
 
             DEBES AJUSTAR EL PLAN:
             1. Aumenta el limit/top-k a 20 o 25 en 'search_product_catalog' para una búsqueda aún más profunda.
-            2. Si la categoría estricta (ej: perfumes) no tiene opciones bajo el presupuesto, busca categorías complementarias o sustitutas más accesibles del mismo público (ej: colonias corporales, eau de toilette, desodorantes).
-            3. Si ningún producto cumple estrictamente con el presupuesto máximo, usa 'filter_and_sort_products' con sort_by='price_asc' sin max_price estricto para recuperar las opciones más económicas disponibles en catálogo y poder orientar al cliente.
+            2. Aplica 'rerank_and_filter_candidates' con feedback semántico explícito.
             """
 
         user_content = f"""
@@ -212,6 +253,11 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
             planned_tools = [t.model_dump() for t in plan.tool_calls]
             plan_rationale = plan.reasoning
             extracted_meta = plan.extracted_metadata or {}
+            intent_spec_dict = plan.intent_spec.model_dump() if getattr(plan, "intent_spec", None) else {}
+            for t in planned_tools:
+                if t.get("tool_name") == "rerank_and_filter_candidates":
+                    if intent_spec_dict and "intent_spec" not in t.get("arguments", {}):
+                        t.setdefault("arguments", {})["intent_spec"] = intent_spec_dict
         except Exception as e:
             logger.warning(f"Error generando plan estructurado con LLM: {e}. Aplicando plan por defecto.")
             plan_rationale = "Plan de contingencia: búsqueda directa en catálogo."
@@ -239,22 +285,37 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
                     "purpose": "Consultar detalles oficiales y catálogo de los productos del turno previo.",
                 }]
             else:
-                fallback_limit = 15 if any(w in f_lower for w in ["todo", "todos", "barato", "menos de", "hasta", "presupuesto", "precio", "rango"]) else 8
-                planned_tools = [{
-                    "tool_name": "search_product_catalog",
-                    "arguments": {"query": fallback_query, "limit": fallback_limit, "user_id": user_id or 5},
-                    "purpose": "Búsqueda estándar de catálogo.",
-                }]
+                fallback_limit = 15 if any(w in f_lower for w in ["todo", "todos", "barato", "menos de", "hasta", "presupuesto", "precio", "rango", "económico", "economico"]) else 8
+                planned_tools = [
+                    {
+                        "tool_name": "search_product_catalog",
+                        "arguments": {"query": fallback_query, "limit": fallback_limit, "user_id": user_id or 5},
+                        "purpose": "Búsqueda estándar de catálogo.",
+                    },
+                    {
+                        "tool_name": "rerank_and_filter_candidates",
+                        "arguments": {
+                            "context_query": fallback_query,
+                            "sort_by": "price_asc" if any(w in f_lower for w in ["barato", "económic", "economico", "menos"]) else "relevance",
+                        },
+                        "purpose": "Reranking contextual y descarte de falsos positivos anatómicos.",
+                    }
+                ]
             extracted_meta = {}
+            intent_spec_dict = {}
 
         return {
             "raw_query": raw_query,
             "plan_rationale": plan_rationale,
             "planned_tools": planned_tools,
             "metadata_filters": extracted_meta,
+            "intent_spec": intent_spec_dict,
             "iteration_count": iteration_count,
             "critique": critique,
             "suggested_improvements": remedy_suggestions,
+            "candidate_products": candidate_products_cleaned,
+            "previous_turn_skus": previous_skus,
+            "previous_turn_prices": previous_prices,
         }
 
     async def execute_tools(self, state: ProductAdvisorState) -> Dict[str, Any]:
@@ -263,17 +324,33 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
         user_id = state.get("user_id") or 5
         raw_query = state.get("raw_query") or "productos"
 
-        # Fallback si no hay tools planificadas
-        if not planned_tools:
+        observations = []
+        candidate_products: List[Dict[str, Any]] = list(state.get("candidate_products") or [])
+        purchase_history = state.get("customer_purchase_history")
+
+        # Medium Reflection Loop: Si venimos de re_rerank_with_feedback y ya disponemos de candidatos,
+        # re-ejecutamos únicamente rerank_and_filter_candidates en memoria con la crítica semántica
+        reflection_action = state.get("reflection_action")
+        critique = state.get("critique")
+        if reflection_action == "re_rerank_with_feedback" and candidate_products:
+            logger.info("product_advisor: Medium Loop activo. Re-ejecutando únicamente 'rerank_and_filter_candidates' en memoria con crítica.")
+            planned_tools = [{
+                "tool_name": "rerank_and_filter_candidates",
+                "arguments": {
+                    "candidates": list(candidate_products),
+                    "context_query": raw_query,
+                    "feedback": critique,
+                    "sort_by": "price_asc" if any(w in raw_query.lower() for w in ["barato", "económic", "economico", "menos"]) else "relevance",
+                    "intent_spec": state.get("intent_spec") or {},
+                },
+                "purpose": "Medium Reflection Loop: re-ordenamiento y descarte en memoria con retroalimentación.",
+            }]
+        elif not planned_tools:
             planned_tools = [{
                 "tool_name": "search_product_catalog",
                 "arguments": {"query": raw_query, "limit": 8, "user_id": user_id},
                 "purpose": "Búsqueda por defecto",
             }]
-
-        observations = []
-        candidate_products: List[Dict[str, Any]] = list(state.get("candidate_products") or [])
-        purchase_history = state.get("customer_purchase_history")
 
         for tool_call in planned_tools:
             t_name = tool_call.get("tool_name")
@@ -321,6 +398,44 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
                         except Exception as pe:
                             logger.warning(f"Error enriqueciendo precios previos a filtrado: {pe}")
 
+            # Inyectar candidatos, contexto y feedback en rerank_and_filter_candidates
+            elif t_name == "rerank_and_filter_candidates":
+                if not t_args.get("candidates"):
+                    t_args["candidates"] = list(candidate_products)
+                if not t_args.get("context_query"):
+                    t_args["context_query"] = raw_query
+                # Si hay crítica en el estado y no vino feedback en los argumentos, inyectarlo
+                if not t_args.get("feedback") and state.get("critique"):
+                    t_args["feedback"] = state.get("critique")
+                if not t_args.get("intent_spec") and state.get("intent_spec"):
+                    t_args["intent_spec"] = state.get("intent_spec")
+                # Asegurar precios en los candidatos antes de rerankear para ordenamiento fiel por precio
+                skus_to_price = [
+                    p.get("sku") for p in t_args["candidates"]
+                    if p.get("sku") and p.get("price") is None
+                ]
+                if skus_to_price:
+                    get_details_fn = self._tools_registry.get("get_product_odoo_details")
+                    if get_details_fn:
+                        try:
+                            price_res = await invoke_advisor_tool(
+                                self._tools_registry,
+                                "get_product_odoo_details",
+                                {"skus": skus_to_price[:20]},
+                            )
+                            if isinstance(price_res, dict) and "products" in price_res:
+                                d_sku = {d.get("sku"): d for d in price_res["products"] if isinstance(d, dict)}
+                                for p in t_args["candidates"]:
+                                    s = p.get("sku")
+                                    if s in d_sku:
+                                        p["price"] = d_sku[s].get("price")
+                                        p["currency"] = d_sku[s].get("currency")
+                                        p["uom"] = d_sku[s].get("uom")
+                                        if d_sku[s].get("sales_description"):
+                                            p["sales_description"] = d_sku[s].get("sales_description")
+                        except Exception as pe:
+                            logger.warning(f"Error enriqueciendo precios previos a reranking: {pe}")
+
             logger.info(f"product_advisor: Ejecutando herramienta '{t_name}' con args {t_args}")
             res = await invoke_advisor_tool(self._tools_registry, t_name, t_args)
 
@@ -343,11 +458,11 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
                                 if s:
                                     existing_skus.add(s)
 
-            elif t_name == "filter_and_sort_products":
+            elif t_name in ("filter_and_sort_products", "rerank_and_filter_candidates"):
                 if isinstance(res, list):
                     if not res and candidate_products:
                         logger.info(
-                            "product_advisor: filter_and_sort_products descartó todos los candidatos por presupuesto. "
+                            f"product_advisor: {t_name} descartó todos los candidatos. "
                             "Preservando opciones disponibles más económicas como respaldo consultivo."
                         )
                         sorted_fallback = sorted(
@@ -452,8 +567,17 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
         raw_query = state.get("raw_query") or ""
         candidate_products = state.get("candidate_products") or []
         purchase_history = state.get("customer_purchase_history")
+        user_id = state.get("user_id")
 
-        products_context = self.format_products_context(candidate_products)
+        # Agrupación jerárquica de conceptos y variantes
+        try:
+            hierarchical_families = await self._hierarchy_resolver.group_candidates_hierarchically(
+                candidate_products, user_id=user_id
+            )
+            products_context = self.format_products_context(hierarchical_families or candidate_products)
+        except Exception as e:
+            logger.warning(f"Error agrupando jerarquía de productos: {e}. Usando formato estándar.")
+            products_context = self.format_products_context(candidate_products)
 
         # Historial de diálogo previo para respuesta natural continua
         all_messages = state.get("messages", [])
@@ -497,15 +621,35 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
                - Identifica de forma precisa a qué producto(s) y SKU(s) específicos se refiere la pregunta.
                - Explica con total claridad su marca comercial y la campaña o edición a la que pertenece.
                - PROHIBIDO TERMINANTEMENTE emitir respuestas ambiguas que mezclen marcas que no corresponden a los productos reales recomendados previamente (ej: si los productos eran de Yanbal, jamás menciones Ésika ni otras marcas no involucradas).
+            8. REGLA DE CÓDIGOS DE PRODUCTO (CÓDIGO = SKU):
+               El término 'código', 'código de producto', 'código de referencia' o 'código de venta' se refiere SIEMPRE y de forma estricta al SKU o código comercial visible (ej: [20013876], [47000]). Los usuarios de negocio no conocen ni utilizan IDs internos de base de datos (`product_id`, `partner_id`). Al mostrar o recomendar productos al usuario, indica siempre su código comercial / SKU entre corchetes o como código de referencia para que el cliente o vendedor pueda solicitarlo o agregarlo a un pedido fácilmente. Queda terminantemente PROHIBIDO exponer IDs numéricos internos.
+            9. ADECUACIÓN DEMOGRÁFICA Y GRUPO ETARIO:
+               - Si la consulta o contexto especifica un cliente/destinatario adulto o maduro (ej: 40-50+ años) y busca colonia o fragancia fresca de uso diario, prioriza líneas sofisticadas, florales sutiles, herbales o frescas elegantes (perfil clásico o distinguido). NUNCA recomiendes fragancias con concepto de fantasía adolescente/juvenil (glitter, notas golosina o nombres de fantasía teen) ni colonias infantiles para adultos.
+               - Si el cliente busca opciones para chicos jóvenes o adolescentes, favorece entonces líneas frescas juveniles, chispeantes y frutales.
+            10. OPORTUNIDAD COMERCIAL POR VARIACIÓN DE PRECIO INTER-CATÁLOGO:
+               - Si en los datos del producto se indica una variación de precio favorable respecto a la campaña anterior (ej: price_variation con descuento o menor precio en la campaña actual), menciónalo de manera consultiva y atractiva para el cliente como una oportunidad especial o rebaja destacada (ej: 'con S/. XX.XX de descuento respecto a la campaña previa').
         """
 
         critique = state.get("critique")
         remedy_suggestions = state.get("suggested_improvements") or []
         previous_draft = state.get("draft_response")
+        reflection_action = state.get("reflection_action")
 
         reflection_feedback = ""
         if critique:
-            reflection_feedback = f"""
+            if reflection_action == "ask_clarification":
+                reflection_feedback = f"""
+
+            ATENCIÓN - CALIBRACIÓN CON EL CLIENTE REQUERIDA (ask_clarification):
+            El Juez Auditor detectó ambigüedad o falta de claridad en el criterio del cliente:
+            "{critique}"
+            Sugerencias: {remedy_suggestions}
+
+            INSTRUCCIONES:
+            Formula una pregunta amable y concisa de calibración orientada a resolver la preferencia del cliente (ej: rango de precio específico, preferencia de marca o tipo de producto) antes de enviar recomendaciones ciegas, mostrando brevemente las alternativas disponibles si es pertinente.
+            """
+            else:
+                reflection_feedback = f"""
 
             ATENCIÓN - RETROALIMENTACIÓN DE REFLEXIÓN (CLARIDAD Y NO AMBIGÜEDAD):
             El borrador anterior fue RECHAZADO por la Rúbrica de Calidad:
@@ -596,19 +740,28 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
             CRITERIOS (Calificación de 1.0 a 10.0):
             1. relevance_score: ¿La respuesta atiende de forma directa, útil y completa la necesidad del usuario considerando el contexto del diálogo?
             2. grounding_score: ¿Los productos, precios y SKUs mencionados provienen estrictamente de los PRODUCTOS DISPONIBLES sin ninguna alucinación?
-            3. constraints_score: ¿Se respetaron los filtros y restricciones del diálogo (público objetivo / género hombre/mujer/niños, marcas solicitadas sin mezclar marcas no deseadas, números de página, campañas, límites de presupuesto)? Si el diálogo solicita productos masculinos/hombre y se recomiendan artículos femeninos o infantiles, califica constraints_score con < 5.0 y desaprueba (is_approved = False) con crítica explícita. Si el usuario fijó un presupuesto ajustado y el catálogo solo tiene opciones de precio ligeramente mayor, califica POSITIVAMENTE (>= 8.0) si el asesor explicó con cortesía el rango de precios disponible y presentó las opciones más cercanas en lugar de dejar al cliente sin respuesta.
-            4. presentation_score: ¿Cumple con el estándar del sintetizador padre (agrupación limpia por marcas cuando hay 2 o más marcas distintas, formato de viñetas con [SKU] Nombre, precio en S/., tono consultivo sin jerga técnica y sin saludos redundantes si hay turnos previos)? OBLIGATORIO: Si el texto contiene viñetas de productos pegadas o concatenadas en el mismo párrafo sin saltos de línea (\n), califica presentation_score < 6.0, marca is_approved = False y exige en remedy_suggestions: 'Separar cada producto en un renglón independiente con salto de línea (\n)'.
+            3. constraints_score: ¿Se respetaron los filtros y restricciones del diálogo (marcas solicitadas, números de página, campañas, límites de presupuesto, género Y ADECUACIÓN DEMOGRÁFICA / GRUPO ETARIO)?
+               - GÉNERO / PÚBLICO: Si el diálogo solicita público objetivo / género hombre/mujer/niños (ej: masculinos/hombre) y se recomiendan artículos femeninos o infantiles (o viceversa), califica constraints_score con < 5.0 y desaprueba (is_approved = False).
+               - ADECUACIÓN DEMOGRÁFICA / EDAD: Si el diálogo solicita productos para una clienta o cliente adulto/maduro (ej: 50 años) y se recomiendan colonias o productos de concepto adolescente/juvenil (fantasía teen, glitter o notas golosina) o infantiles (o viceversa), califica constraints_score con < 5.0, desaprueba (is_approved = False) y selecciona 're_rerank_with_feedback' exigiendo líneas acordes al perfil etario maduro (perfil sobrio, floral clásico o distinguido).
+            4. presentation_score: ¿Cumple con el estándar del sintetizador padre (agrupación limpia por marcas cuando hay 2 o más marcas distintas, formato de viñetas con [SKU] Nombre, precio en S/., tono consultivo sin jerga técnica y sin saludos redundantes si hay turnos previos)? OBLIGATORIO: Si el texto contiene viñetas de productos pegadas o concatenadas en el mismo párrafo sin saltos de línea (\\n), califica presentation_score < 6.0, marca is_approved = False.
             5. clarity_and_unambiguity_score: ¿La respuesta es 100% clara, directa e inequívoca? En preguntas de seguimiento o referencia de turnos previos ('esto a qué catálogo pertenece', '¿cuánto cuesta ese?', '¿de qué marca son?'):
                - Debe identificar con exactitud de qué productos se habla y atribuir con veracidad quirúrgica su marca y catálogo/campaña real.
-               - PROHIBIDO APROBAR si la respuesta agrupa o menciona marcas que no corresponden a los productos reales recomendados (ej: decir 'pertenecen a nuestras campañas de Ésika y Yanbal' cuando los productos discutidos eran solo de Yanbal). Califica clarity_and_unambiguity_score < 6.0, marca is_approved = False y fija reflection_action = 'refine_synthesis'.
+               - PROHIBIDO APROBAR si la respuesta agrupa o menciona marcas que no corresponden a los productos reales recomendados.
+            6. intent_fulfillment_score: ¿Cumple fielmente con el cambio o preferencia solicitada en este turno?
+               - AUDITORÍA DE PRECIO RELATIVO ('algo aún más económico', 'más barato'): Si el usuario pidió opciones más económicas respecto al turno previo y la respuesta repite productos del mismo precio o más caros ignorando opciones más baratas presentes en los candidatos, califica intent_fulfillment_score < 5.0, desaprueba (is_approved = False) y selecciona 're_rerank_with_feedback'.
+               - DISCRIMINACIÓN ANATÓMICA: Si el usuario busca cremas para rostro y se incluyeron cremas corporales o de manos, califica < 5.0 y selecciona 're_rerank_with_feedback'.
+            7. criteria_clarity_score: ¿El criterio de la consulta está 100% claro o es ambiguo?
+               - Si la consulta es tan ambigua que no se puede discernir qué producto recomendar sin calibración (ej: disyuntivas comerciales marcadas o preferencias indefinidas), califica < 6.0 y selecciona 'ask_clarification'.
 
             ACCIÓN DE REFLEXIÓN (reflection_action):
-            - 'approve': Si todos los 5 criterios son >= 7.0 y el promedio es >= 8.0.
-            - 'refine_synthesis': Si is_approved es False pero los productos candidatos en catálogo son válidos y la falla radica en redacción ambigua, mezcla de marcas, falta de claridad o formato.
-            - 'replan_tools': Si is_approved es False y faltan productos en catálogo o la búsqueda trajo artículos completamente ajenos a la intención.
+            - 'approve': Si todos los criterios son >= 7.0 y el promedio es >= 8.0.
+            - 're_rerank_with_feedback' (MEDIUM LOOP): Si los productos candidatos disponibles contienen opciones válidas pero el orden o selección actual violó la intención (ej: se necesita priorizar las opciones más baratas, descartar falsos positivos anatómicos, o ajustar el conteo). Proporciona la crítica semántica precisa en 'critique'.
+            - 'refine_synthesis' (FAST LOOP): Si los productos seleccionados son los correctos pero falló la redacción, el formato de viñetas, la claridad o hubo ambigüedad en el texto.
+            - 'replan_tools' (SLOW LOOP): Si faltan productos completamente en el catálogo o se necesita una búsqueda semántica con nuevos términos.
+            - 'ask_clarification': Si el criterio del cliente no está claro y es preferible formular una pregunta de calibración.
 
             REGLA DE APROBACIÓN (is_approved):
-            - Para ser True: CADA uno de los 5 puntajes debe ser >= 7.0 Y el promedio general debe ser >= 8.0.
+            - Para ser True: CADA uno de los puntajes debe ser >= 7.0 Y el promedio general debe ser >= 8.0.
             - Si no cumple, marca is_approved = False y detalla 'critique', 'remedy_suggestions' y 'reflection_action'.
         """
 
@@ -631,6 +784,31 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
             HumanMessage(content=user_content),
         ]
 
+        # 1. Auditoría Determinista Anti-Alucinación de SKUs (Capa 2)
+        grounding_check = SKUGroundingValidator.validate_draft_grounding(
+            draft_response=draft_response,
+            candidate_products=candidate_products,
+        )
+        if not grounding_check.is_valid and iteration_count < max_iterations:
+            logger.warning(f"[RubricJudge] Grounding determinista rechazó borrador: {grounding_check.invalid_skus}")
+            return {
+                "meets_rubric": False,
+                "rubric_scores": {
+                    "relevance": 7.5,
+                    "grounding": 4.0,
+                    "constraints": 7.0,
+                    "presentation": 7.0,
+                    "clarity_and_unambiguity": 6.0,
+                    "intent_fulfillment": 7.0,
+                    "criteria_clarity": 8.0,
+                },
+                "reflection_action": "refine_synthesis",
+                "critique": grounding_check.critique_message,
+                "suggested_improvements": grounding_check.suggested_improvements,
+                "iteration_count": iteration_count,
+                "is_sufficient": False,
+            }
+
         try:
             evaluation: QualityRubricEvaluation = await self._rubric_judge.ainvoke(messages)
             is_approved = evaluation.is_approved
@@ -640,7 +818,11 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
             if is_approved:
                 refl_action = "approve"
             elif not refl_action or refl_action == "approve":
-                if evaluation.constraints_score < 7.0 or evaluation.relevance_score < 7.0 or not candidate_products:
+                if getattr(evaluation, "criteria_clarity_score", 8.0) < 6.0:
+                    refl_action = "ask_clarification"
+                elif getattr(evaluation, "intent_fulfillment_score", 8.0) < 7.0:
+                    refl_action = "re_rerank_with_feedback"
+                elif evaluation.constraints_score < 7.0 or evaluation.relevance_score < 7.0 or not candidate_products:
                     refl_action = "replan_tools"
                 else:
                     refl_action = "refine_synthesis"
@@ -650,6 +832,8 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
                 "constraints": evaluation.constraints_score,
                 "presentation": evaluation.presentation_score,
                 "clarity_and_unambiguity": getattr(evaluation, "clarity_and_unambiguity_score", 8.0),
+                "intent_fulfillment": getattr(evaluation, "intent_fulfillment_score", 8.0),
+                "criteria_clarity": getattr(evaluation, "criteria_clarity_score", 8.0),
             }
         except Exception as e:
             logger.warning(f"Error evaluando rúbrica con LLM: {e}. Aprobando por seguridad de avance.")
@@ -672,8 +856,19 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
     async def finalize_response(self, state: ProductAdvisorState) -> Dict[str, Any]:
         """Nodo 5: Aplica sanitización whitelabel, formato de divisas y genera el mensaje final."""
         draft_response = state.get("draft_response") or "No se encontraron productos disponibles en el catálogo."
+        candidate_products = state.get("candidate_products") or []
         iteration_count = state.get("iteration_count", 0)
         meets_rubric = state.get("meets_rubric", False)
+
+        # Sanitización fail-safe final de SKUs (Capa 4)
+        authorized_skus = {
+            str(p.get("sku") or p.get("default_code") or "").strip()
+            for p in candidate_products
+            if isinstance(p, dict) and (p.get("sku") or p.get("default_code"))
+        }
+        authorized_skus.discard("")
+        if authorized_skus:
+            draft_response = SKUFailSafeSanitizer.sanitize_text(draft_response, authorized_skus)
 
         # Si agotó las iteraciones sin aprobar la rúbrica, agregar nota constructiva
         if not meets_rubric and iteration_count >= state.get("max_iterations", self._default_max_iterations):

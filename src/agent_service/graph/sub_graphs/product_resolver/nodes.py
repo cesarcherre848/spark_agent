@@ -79,6 +79,7 @@ class ProductResolverNodes(BaseSynthesizerNode):
 
             Tareas:
                 - Extraer con precisión todos los códigos SKU o referencias de producto solicitados por el cliente.
+                - REGLA DE DESCONOCIMIENTO DE IDS INTERNOS: Los usuarios de negocio NO conocen ni utilizan IDs internos de base de datos (`product_id`, `partner_id`). Todo número o código indicado ('código', 'referencia', 'código de venta') es SIEMPRE un SKU comercial (ej: 20013876, 47000), NUNCA un ID técnico.
                 - IMPORTANTE: Si el cliente hace referencia a productos recomendados o discutidos previamente en el historial de la conversación (ej: '¿qué precio tienen?', 'cotízamelos', 'el primero', 'los recomendados', 'cuánto cuestan', o menciona sus nombres), revisa el historial y los SKUs sugeridos en el contexto, y extrae los códigos SKU correspondientes con cantidad 1 por defecto.
                 - Extraer cantidades y atributos técnicos (ej. cantidad, medidas, color). Si no se especifica cantidad, asume 1 por defecto para cotización.
                 - Identificar el nombre del proveedor o partner si el usuario lo menciona (ej. 'de Siderperu', 'de Unique').
@@ -288,7 +289,7 @@ class ProductResolverNodes(BaseSynthesizerNode):
                 partner_meta = item.get("partner_metadata", {})
                 break
 
-        options_str = ", ".join(f"{partner_meta.get(p, p)} ({p})" for p in candidate_options)
+        options_str = ", ".join(f"{partner_meta.get(p, p)}" for p in candidate_options)
         prompt_message = (
             f"El producto SKU '{conflicted_sku}' está disponible con varios proveedores: {options_str}. "
             f"¿Con cuál proveedor deseas procesar este producto?"

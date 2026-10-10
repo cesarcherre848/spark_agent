@@ -33,6 +33,8 @@ class ProductAdvisorState(TypedDict, total=False):
     enriched_products: Optional[List[Dict[str, Any]]]
     filtered_products: Optional[List[Dict[str, Any]]]
     matched_skus: Optional[List[str]]
+    previous_turn_skus: Optional[List[str]]
+    previous_turn_prices: Optional[Dict[str, float]]
 
     # Historial y preferencias de cliente
     customer_purchase_history: Optional[Dict[str, Any]]
@@ -40,6 +42,7 @@ class ProductAdvisorState(TypedDict, total=False):
     # Filtros y restricciones de catálogo
     metadata_filters: Optional[Dict[str, Any]]
     budget_constraints: Optional[Dict[str, Any]]
+    intent_spec: Optional[Dict[str, Any]]
 
     # Síntesis y borrador
     draft_response: Optional[str]

@@ -226,13 +226,15 @@ def test_base_synthesizer_format_products_context():
     ]
 
     formatted = BaseSynthesizerNode.format_products_context(prods)
-    assert "[1] [SKU: 761] Hydra-Lip Líquido" in formatted
+    assert "PRODUCTO: Hydra-Lip Líquido" in formatted
+    assert "SKU OFICIAL: 761" in formatted
     assert "Marca: Yanbal" in formatted
-    assert "Campaña C10" in formatted
-    assert "Pág. 15" in formatted
+    assert "Campaña: C10" in formatted
+    assert "Página de catálogo: 15" in formatted
     assert "Precio: S/. 45.00" in formatted
 
-    assert "[2] [SKU: 9812] Colorfix 24H" in formatted
+    assert "PRODUCTO: Colorfix 24H" in formatted
+    assert "SKU OFICIAL: 9812" in formatted
     assert "Marca: Ésika" in formatted
     assert "Precio: S/. 32.50" in formatted
 

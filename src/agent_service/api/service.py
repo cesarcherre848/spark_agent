@@ -20,11 +20,22 @@ DEFAULT_CACHE_TTL = int(os.getenv("PHONE_CACHE_TTL_SECONDS", "3600"))
 DEFAULT_CACHE_MAXSIZE = int(os.getenv("PHONE_CACHE_MAXSIZE", "10000"))
 
 
+def is_bsuid(identifier: str) -> bool:
+    """Detecta si un identificador es un BSUID de Meta WhatsApp (ej. 'PE.2285075095400313')."""
+    if not identifier:
+        return False
+    s = str(identifier).strip()
+    return bool(re.match(r"^[A-Za-z]{2,4}\.\d+$", s))
+
+
 def normalize_phone(raw_phone: str) -> str:
-    """Limpia el teléfono extrayendo únicamente los caracteres numéricos."""
+    """Limpia el teléfono extrayendo únicamente los caracteres numéricos o preserva el BSUID si corresponde."""
     if not raw_phone:
         return ""
-    digits = re.sub(r"[^\d]", "", str(raw_phone))
+    s = str(raw_phone).strip()
+    if is_bsuid(s):
+        return s
+    digits = re.sub(r"[^\d]", "", s)
     return digits
 
 
@@ -82,6 +93,12 @@ class PhoneUserResolver:
         clean_phone = normalize_phone(phone)
         if not clean_phone:
             logger.warning("Teléfono vacío recibido para resolución.")
+            return self.default_user_id
+
+        if is_bsuid(clean_phone):
+            logger.info(
+                f"Identificador BSUID recibido ('{clean_phone}'). Asignando vendedor por defecto: {self.default_user_id}"
+            )
             return self.default_user_id
 
         # 1. Búsqueda en Caché

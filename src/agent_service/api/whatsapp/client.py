@@ -56,9 +56,15 @@ class WhatsAppClient:
         Returns:
             Diccionario con la respuesta de Meta Graph API conteniendo los IDs de mensaje generados.
         """
-        clean_to = "".join(filter(str.isdigit, str(to)))
+        from src.agent_service.api.service import is_bsuid
+        s_to = str(to or "").strip()
+        if is_bsuid(s_to):
+            clean_to = s_to
+        else:
+            clean_to = "".join(filter(str.isdigit, s_to))
+
         if not clean_to:
-            raise ValueError("El destinatario 'to' no contiene un número telefónico válido.")
+            raise ValueError("El destinatario 'to' no contiene un número telefónico o BSUID válido.")
 
         clean_text = str(text or "").strip()
         if not clean_text:
@@ -124,6 +130,90 @@ class WhatsAppClient:
         except Exception as exc:
             logger.warning(f"[WhatsAppClient] No fue posible marcar mensaje {message_id} como leído: {exc}")
             return False
+
+    async def send_typing_indicator(
+        self,
+        message_id: str,
+        phone_number_id: Optional[str] = None,
+    ) -> bool:
+        """Envía el estado 'escribiendo...' a WhatsApp en respuesta al mensaje indicado.
+
+        Utiliza la especificación oficial de Meta Cloud API: enviar status='read'
+        junto a typing_indicator={'type': 'text'} asociado al message_id entrante.
+        Meta expira automáticamente el indicador tras ~25 segundos o al enviar un mensaje.
+        """
+        if not message_id:
+            return False
+
+        payload = {
+            "messaging_product": "whatsapp",
+            "status": "read",
+            "message_id": message_id,
+            "typing_indicator": {
+                "type": "text",
+            },
+        }
+
+        url = self._get_url(phone_number_id=phone_number_id)
+        headers = self._get_headers()
+
+        try:
+            if self._client is not None:
+                resp = await self._client.post(url, headers=headers, json=payload, timeout=5.0)
+                return resp.status_code == 200
+
+            async with httpx.AsyncClient(timeout=5.0) as http_client:
+                resp = await http_client.post(url, headers=headers, json=payload)
+                return resp.status_code == 200
+        except Exception as exc:
+            logger.warning(f"[WhatsAppClient] No fue posible enviar typing indicator para {message_id}: {exc}")
+            return False
+
+    async def download_audio(self, media_id: str) -> tuple[bytes, str]:
+        """Descarga el contenido binario de un audio desde Meta Cloud API.
+
+        Paso 1: Consulta los metadatos del objeto multimedia para obtener su URL temporal.
+        Paso 2: Descarga los bytes con autorización Bearer.
+
+        Returns:
+            Tupla (audio_bytes, mime_type)
+        """
+        if not media_id:
+            raise ValueError("El media_id es obligatorio para descargar el audio.")
+
+        meta_url = (
+            f"{self._settings.api_base_url.rstrip('/')}/"
+            f"{self._settings.api_version}/{media_id}"
+        )
+        headers = self._get_headers()
+
+        logger.info(f"[WhatsAppClient] Consultando URL de descarga para media_id={media_id}...")
+
+        if self._client is not None:
+            resp = await self._client.get(meta_url, headers=headers, timeout=20.0)
+            resp.raise_for_status()
+            data = resp.json()
+            download_url = data.get("url")
+            mime_type = data.get("mime_type", "audio/ogg")
+            if not download_url:
+                raise ValueError(f"Meta no devolvió 'url' para media_id={media_id}")
+
+            audio_resp = await self._client.get(download_url, headers={"Authorization": headers["Authorization"]}, timeout=60.0)
+            audio_resp.raise_for_status()
+            return audio_resp.content, mime_type
+
+        async with httpx.AsyncClient(timeout=60.0) as http_client:
+            resp = await http_client.get(meta_url, headers=headers)
+            resp.raise_for_status()
+            data = resp.json()
+            download_url = data.get("url")
+            mime_type = data.get("mime_type", "audio/ogg")
+            if not download_url:
+                raise ValueError(f"Meta no devolvió 'url' para media_id={media_id}")
+
+            audio_resp = await http_client.get(download_url, headers={"Authorization": headers["Authorization"]})
+            audio_resp.raise_for_status()
+            return audio_resp.content, mime_type
 
 
 _GLOBAL_WHATSAPP_CLIENT: Optional[WhatsAppClient] = None

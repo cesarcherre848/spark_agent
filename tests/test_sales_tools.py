@@ -641,5 +641,157 @@ async def test_odoo_create_quotation_fails_without_partner_or_customer(mock_odoo
     assert "No se identificó" in res["error"]
 
 
+def test_normalize_item_input_polymorphic():
+    """Valida la normalización polimórfica de ítems asegurando que 'código' siempre sea SKU."""
+    from src.agent_service.tools.sales_tools import normalize_item_input
+
+    # 1. product_sku y cantidad
+    it1 = normalize_item_input({"product_sku": "20013876", "cantidad": 3, "action": "set"})
+    assert it1["sku"] == "20013876"
+    assert it1["qty"] == 3.0
+    assert it1["action"] == "set"
+
+    # 2. code y unidades
+    it2 = normalize_item_input({"code": "47000", "unidades": 2})
+    assert it2["sku"] == "47000"
+    assert it2["qty"] == 2.0
+    assert it2["action"] == "add"
+
+    # 3. codigo y quantity
+    it3 = normalize_item_input({"codigo": "20010996", "quantity": 1})
+    assert it3["sku"] == "20010996"
+    assert it3["qty"] == 1.0
+
+    # 4. Texto descriptivo en product_id (caso de falla en sesión de usuario 7)
+    it4 = normalize_item_input({"product_id": "BB Cream antiedad", "qty": 2})
+    assert it4["sku"] == "BB Cream antiedad"
+    assert it4["product_id"] is None
+    assert it4["qty"] == 2.0
+
+    # 5. ID numérico válido
+    it5 = normalize_item_input({"product_id": 42, "sku": "20013876", "qty": 1})
+    assert it5["sku"] == "20013876"
+    assert it5["product_id"] == 42
+
+
+@pytest.mark.asyncio
+async def test_odoo_create_quotation_partitions_by_supplier(mock_odoo_client):
+    """Valida la regla de negocio: un pedido no puede tener 2 proveedores.
+    Si se solicitan ítems de Yanbal y Belcorp, se particionan en órdenes separadas por proveedor.
+    """
+    from src.agent_service.core.stores.product.schemas import GetProductBySkusOutput, ProductOdooDetail
+
+    # Mock productos resueltos
+    mock_odoo_client.get_products_by_skus = AsyncMock(
+        return_value=GetProductBySkusOutput(
+            products=[
+                ProductOdooDetail(sku="20013876", name="BB Cream Yanbal", price=50.0, product_id=101),
+                ProductOdooDetail(sku="47000", name="Labial Ésika", price=30.0, product_id=202),
+            ],
+            not_found_skus=[],
+        )
+    )
+
+    # 2 llamadas a create (una por cada proveedor)
+    resp_create_1 = MagicMock(spec=Response)
+    resp_create_1.json.return_value = {"result": 301}
+    resp_create_2 = MagicMock(spec=Response)
+    resp_create_2.json.return_value = {"result": 302}
+
+    # 2 llamadas a view_quotation (search_read + read lines)
+    resp_search_1 = MagicMock(spec=Response)
+    resp_search_1.json.return_value = {
+        "result": [{
+            "id": 301,
+            "name": "S00021",
+            "amount_total": 50.0,
+            "amount_untaxed": 50.0,
+            "amount_tax": 0.0,
+            "order_line": [1],
+            "partner_id": [11, "Gemma"],
+        }]
+    }
+    resp_lines_1 = MagicMock(spec=Response)
+    resp_lines_1.json.return_value = {"result": [{"id": 1, "product_id": [101, "[20013876] BB Cream"], "product_uom_qty": 1.0, "price_unit": 50.0, "price_subtotal": 50.0}]}
+
+    resp_search_2 = MagicMock(spec=Response)
+    resp_search_2.json.return_value = {
+        "result": [{
+            "id": 302,
+            "name": "S00022",
+            "amount_total": 30.0,
+            "amount_untaxed": 30.0,
+            "amount_tax": 0.0,
+            "order_line": [2],
+            "partner_id": [11, "Gemma"],
+        }]
+    }
+    resp_lines_2 = MagicMock(spec=Response)
+    resp_lines_2.json.return_value = {"result": [{"id": 2, "product_id": [202, "[47000] Labial Ésika"], "product_uom_qty": 1.0, "price_unit": 30.0, "price_subtotal": 30.0}]}
+
+    mock_odoo_client._client.post.side_effect = [
+        resp_create_1, resp_search_1, resp_lines_1,
+        resp_create_2, resp_search_2, resp_lines_2,
+    ]
+
+    with patch("src.agent_service.tools.incentive_tools.get_sku_supplier_map", new_callable=AsyncMock) as mock_sup_map:
+        mock_sup_map.return_value = {"20013876": 9, "47000": 17}
+
+        items = [
+            {"product_sku": "20013876", "qty": 1.0},
+            {"code": "47000", "qty": 1.0},
+        ]
+        res = await odoo_create_quotation(user_id=7, partner_id=11, items=items, client=mock_odoo_client)
+
+        assert res["success"] is True
+        assert res["partitioned_by_supplier"] is True
+        assert len(res["orders"]) == 2
+        suppliers = {o["supplier_id"] for o in res["orders"]}
+        assert suppliers == {9, 17}
+        assert res["amount_total"] == 80.0
+
+
+@pytest.mark.asyncio
+async def test_odoo_update_quotation_rejects_conflicting_supplier(mock_odoo_client):
+    """Valida que odoo_update_quotation rechace agregar productos de un proveedor distinto
+    a una cotización existente que ya contiene productos de otro proveedor.
+    """
+    # 1. Leer orden existente (S00009)
+    resp_order = MagicMock(spec=Response)
+    resp_order.json.return_value = {
+        "result": [{
+            "id": 99,
+            "name": "S00009",
+            "order_line": [10],
+        }]
+    }
+
+    # 2. Leer líneas existentes (contiene producto de Yanbal: SKU 20013876)
+    resp_lines = MagicMock(spec=Response)
+    resp_lines.json.return_value = {
+        "result": [{
+            "id": 10,
+            "name": "[20013876] BB Cream Yanbal",
+            "product_id": [101, "[20013876] BB Cream Yanbal"],
+            "product_uom_qty": 2.0,
+            "price_unit": 50.0,
+        }]
+    }
+
+    mock_odoo_client._client.post.side_effect = [resp_order, resp_lines]
+
+    with patch("src.agent_service.tools.incentive_tools.get_sku_supplier_map", new_callable=AsyncMock) as mock_sup_map:
+        mock_sup_map.return_value = {"20013876": 9, "47000": 17}
+
+        # Intentar agregar producto de Belcorp (SKU 47000) a la orden de Yanbal
+        items = [{"code": "47000", "qty": 1.0, "action": "add"}]
+        res = await odoo_update_quotation(order_id=99, items=items, client=mock_odoo_client)
+
+        assert res["success"] is False
+        assert "un solo proveedor" in res["error"]
+        assert res["conflicting_supplier"] == "Belcorp (Ésika / Cyzone / L'Bel)"
+
+
+
 
 

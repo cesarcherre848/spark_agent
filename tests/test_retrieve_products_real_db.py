@@ -36,6 +36,7 @@ def embedding_service():
 
 
 @pytest.mark.integration
+@pytest.mark.real_db
 @pytest.mark.asyncio
 async def test_retrieve_products_with_real_database(db_conninfo, embedding_service):
     """Prueba de integración end-to-end contra PostgreSQL (pgvector + RRF) y BAAI/bge-m3."""
@@ -108,6 +109,7 @@ async def test_retrieve_products_with_metadata_tags_real_db(db_conninfo, embeddi
 
 
 @pytest.mark.integration
+@pytest.mark.real_db
 @pytest.mark.asyncio
 async def test_retrieve_products_esika_brand_variations_real_db(db_conninfo, embedding_service):
     """Prueba que la búsqueda de Ésika funciona con tilde, sin tilde ('esika') y con doble s ('essika')."""

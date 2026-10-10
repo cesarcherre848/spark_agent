@@ -59,6 +59,13 @@ class SalesManageState(TypedDict, total=False):
     # Rama List (órdenes agrupadas por estado)
     orders_list: Optional[Dict[str, List[Dict[str, Any]]]]
 
+    # Gestión de Contexto Multi-Orden y Cartera Activa en Sesión
+    session_orders: Optional[Dict[str, Dict[str, Any]]]  # Mapa de órdenes activas por cliente en sesión {"nombre_cliente": {"order_name": "S00016", "partner_id": 32, ...}}
+    active_customer: Optional[str]
+    active_partner_id: Optional[int]
+    active_order: Optional[str]
+    active_order_id: Optional[int]
+
     # Subflujo Duplicados
     current_candidates: Optional[List[Dict[str, Any]]]
     has_possible_duplicates: bool
@@ -74,3 +81,4 @@ class SalesManageState(TypedDict, total=False):
     operation_result: Optional[Dict[str, Any]]
     cancellation_reason: Optional[str]
     final_response: Optional[str]
+

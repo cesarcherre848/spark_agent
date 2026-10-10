@@ -48,6 +48,67 @@ def normalize_order_name(order_name: Optional[str]) -> Optional[str]:
     return None
 
 
+def normalize_item_input(it: Any) -> Dict[str, Any]:
+    """Normaliza polimórficamente los atributos de un ítem garantizando que 'código' sea SKU."""
+    if not isinstance(it, dict):
+        return {"sku": str(it).strip(), "qty": 1.0, "product_id": None, "price_unit": None, "product_name": None}
+
+    it_copy = dict(it)
+    sku = (
+        it_copy.get("sku")
+        or it_copy.get("product_sku")
+        or it_copy.get("code")
+        or it_copy.get("codigo")
+        or it_copy.get("default_code")
+        or it_copy.get("reference")
+        or ""
+    )
+
+    raw_pid = it_copy.get("product_id")
+    numeric_pid = None
+    if raw_pid is not None:
+        raw_pid_str = str(raw_pid).strip()
+        if raw_pid_str.isdigit():
+            numeric_pid = int(raw_pid_str)
+        elif not sku:
+            sku = raw_pid_str
+
+    if not sku:
+        sku = it_copy.get("product_name") or it_copy.get("name") or ""
+
+    raw_qty = (
+        it_copy.get("qty")
+        if "qty" in it_copy and it_copy["qty"] is not None
+        else (
+            it_copy.get("quantity")
+            or it_copy.get("cantidad")
+            or it_copy.get("unidades")
+            or 1.0
+        )
+    )
+    try:
+        qty = float(raw_qty)
+    except (ValueError, TypeError):
+        qty = 1.0
+
+    raw_price = it_copy.get("price_unit") if it_copy.get("price_unit") is not None else it_copy.get("price")
+    price_val = None
+    if raw_price is not None:
+        try:
+            price_val = float(raw_price)
+        except (ValueError, TypeError):
+            price_val = None
+
+    return {
+        "sku": str(sku).strip(),
+        "qty": qty,
+        "product_id": numeric_pid,
+        "price_unit": price_val,
+        "product_name": it_copy.get("product_name") or it_copy.get("name"),
+        "action": it_copy.get("action", "add"),
+    }
+
+
 def get_shared_odoo_client(client: Optional[OdooClient] = None) -> OdooClient:
     """Retorna el cliente de Odoo inyectado o inicializa uno nuevo usando la configuración."""
     if client is not None:
@@ -372,22 +433,12 @@ async def odoo_create_quotation(
             "error": f"No se identificó ni pudo registrar al cliente '{customer_name or 'desconocido'}' en el sistema.",
         }
 
-    order_lines = []
-    skus_to_resolve = []
-    items_clean = []
-    for it in (items or []):
-        it_dict = dict(it)
-        if "sku" not in it_dict or not it_dict["sku"]:
-            it_dict["sku"] = it_dict.get("product_name") or it_dict.get("name") or ""
-        if "qty" not in it_dict:
-            it_dict["qty"] = it_dict.get("quantity") or it_dict.get("cantidad") or 1.0
-        items_clean.append(it_dict)
+    # 1. Normalizar todos los ítems de entrada
+    items_clean = [normalize_item_input(it) for it in (items or [])]
+    items_clean = [it for it in items_clean if it.get("sku") or it.get("product_id")]
 
-    for it in items_clean:
-        if not it.get("product_id") and it.get("sku"):
-            skus_to_resolve.append(str(it["sku"]).strip())
-
-    # Si hay SKUs sin product_id numérico, resolverlos
+    # 2. Resolver SKUs sin product_id numérico
+    skus_to_resolve = [it["sku"] for it in items_clean if not it.get("product_id") and it.get("sku")]
     resolved_skus_map = {}
     not_found_skus = []
     if skus_to_resolve:
@@ -397,92 +448,159 @@ async def odoo_create_quotation(
             clean_sku = str(p.sku).strip()
             resolved_skus_map[clean_sku] = p
 
-    merged_items: Dict[int, Dict[str, Any]] = {}
     for it in items_clean:
-        pid = it.get("product_id")
-        qty = float(it.get("qty") or it.get("cantidad") or 1.0)
-        sku = str(it.get("sku", "")).strip()
-
-        if not pid and sku in resolved_skus_map:
+        sku = it.get("sku")
+        if not it.get("product_id") and sku in resolved_skus_map:
             p_obj = resolved_skus_map[sku]
-            pid = p_obj.product_id
-            price_unit = it.get("price_unit") or (p_obj.price if p_obj.price is not None else 0.0)
-        else:
-            price_unit = it.get("price_unit")
+            it["product_id"] = p_obj.product_id
+            if it.get("price_unit") is None and p_obj.price is not None:
+                it["price_unit"] = p_obj.price
 
-        if pid:
-            int_pid = int(pid)
-            if int_pid in merged_items:
-                merged_items[int_pid]["qty"] += qty
-                if price_unit is not None:
-                    merged_items[int_pid]["price_unit"] = price_unit
-            else:
-                merged_items[int_pid] = {"qty": qty, "price_unit": price_unit}
-
-    for pid, data in merged_items.items():
-        line_vals: Dict[str, Any] = {
-            "product_id": pid,
-            "product_uom_qty": data["qty"],
-        }
-        if data["price_unit"] is not None:
-            line_vals["price_unit"] = float(data["price_unit"])
-        order_lines.append((0, 0, line_vals))
-
-    if not order_lines:
+    valid_items = [it for it in items_clean if it.get("product_id")]
+    if not valid_items:
         return {
             "success": False,
             "error": f"Los productos con código {not_found_skus or skus_to_resolve} no existen o están inactivos en el sistema.",
             "not_found_skus": not_found_skus or skus_to_resolve,
         }
 
-    create_vals = {
-        "partner_id": int(partner_id),
-        "user_id": resolved_user_id,
-        "order_line": order_lines,
-    }
-
-    call_payload = {
-        "jsonrpc": "2.0",
-        "method": "call",
-        "params": {
-            "model": "sale.order",
-            "method": "create",
-            "args": [create_vals],
-            "kwargs": {},
-        },
-        "id": 303,
-    }
-
+    # 3. Validar mapa de proveedores (Regla de negocio: Un pedido debe ser para un solo proveedor)
+    from src.agent_service.tools.incentive_tools import get_sku_supplier_map, SUPPLIER_ALIASES
+    sku_supplier_map = {}
     try:
-        response = await c._client.post("/web/dataset/call_kw", json=call_payload)
-        response.raise_for_status()
-        data = response.json()
+        sku_supplier_map = await get_sku_supplier_map(client=c)
     except Exception as e:
-        logger.error(f"Error de red al crear cotización en Odoo: {e}")
-        raise ConnectionError(f"Error al conectar con Odoo API: {e}") from e
+        logger.warning(f"No se pudo cargar el mapa de proveedores: {e}")
 
-    if "error" in data:
-        err_msg = data["error"].get("data", {}).get("message") or data["error"].get("message")
-        logger.error(f"Error devuelto por Odoo al crear cotización: {err_msg}")
-        raise RuntimeError(f"Error en Odoo API (odoo_create_quotation): {err_msg}")
+    # Agrupar ítems válidos por supplier_id
+    items_by_supplier: Dict[int, List[Dict[str, Any]]] = {}
+    for it in valid_items:
+        sku = it.get("sku")
+        sid = sku_supplier_map.get(sku, 0) if sku else 0
+        items_by_supplier.setdefault(sid, []).append(it)
 
-    order_id = data.get("result")
-    if not order_id:
-        raise RuntimeError("Odoo no devolvió un ID de orden válido al crear la cotización.")
+    # 4. Crear órdenes particionadas por proveedor
+    created_orders = []
+    all_lines = []
+    for sid, sup_items in items_by_supplier.items():
+        merged_items: Dict[int, Dict[str, Any]] = {}
+        for it in sup_items:
+            pid = int(it["product_id"])
+            qty = float(it.get("qty") or 1.0)
+            pu = it.get("price_unit")
+            if pid in merged_items:
+                merged_items[pid]["qty"] += qty
+                if pu is not None:
+                    merged_items[pid]["price_unit"] = pu
+            else:
+                merged_items[pid] = {"qty": qty, "price_unit": pu}
 
-    # Leer datos finales de la orden creada
-    view_data = await odoo_view_quotation(order_id=int(order_id), client=c)
+        sup_order_lines = []
+        for pid, data in merged_items.items():
+            line_vals = {
+                "product_id": pid,
+                "product_uom_qty": data["qty"],
+            }
+            if data["price_unit"] is not None:
+                line_vals["price_unit"] = float(data["price_unit"])
+            sup_order_lines.append((0, 0, line_vals))
+
+        if not sup_order_lines:
+            continue
+
+        create_vals = {
+            "partner_id": int(partner_id),
+            "user_id": resolved_user_id,
+            "order_line": sup_order_lines,
+        }
+
+        call_payload = {
+            "jsonrpc": "2.0",
+            "method": "call",
+            "params": {
+                "model": "sale.order",
+                "method": "create",
+                "args": [create_vals],
+                "kwargs": {},
+            },
+            "id": 303,
+        }
+
+        try:
+            response = await c._client.post("/web/dataset/call_kw", json=call_payload)
+            response.raise_for_status()
+            data = response.json()
+        except Exception as e:
+            logger.error(f"Error de red al crear cotización en Odoo: {e}")
+            raise ConnectionError(f"Error al conectar con Odoo API: {e}") from e
+
+        if "error" in data:
+            err_msg = data["error"].get("data", {}).get("message") or data["error"].get("message")
+            logger.error(f"Error devuelto por Odoo al crear cotización: {err_msg}")
+            raise RuntimeError(f"Error en Odoo API (odoo_create_quotation): {err_msg}")
+
+        order_id = data.get("result")
+        if isinstance(order_id, (list, tuple)) and order_id:
+            order_id = order_id[0]
+            if isinstance(order_id, dict):
+                order_id = order_id.get("id")
+        if not order_id:
+            raise RuntimeError("Odoo no devolvió un ID de orden válido al crear la cotización.")
+
+        view_data = await odoo_view_quotation(order_id=int(order_id), client=c)
+        sup_info = SUPPLIER_ALIASES.get(sid, {})
+        sup_name = sup_info.get("name") or (f"Proveedor {sid}" if sid else "General")
+        view_data["supplier_id"] = sid
+        view_data["supplier_name"] = sup_name
+        created_orders.append(view_data)
+        all_lines.extend(view_data.get("lines", []))
+
+    if not created_orders:
+        return {
+            "success": False,
+            "error": f"Los productos con código {not_found_skus or skus_to_resolve} no existen o están inactivos en el sistema.",
+            "not_found_skus": not_found_skus or skus_to_resolve,
+        }
+
+    # Si se crearon múltiples órdenes por existir productos de más de un proveedor:
+    if len(created_orders) > 1:
+        names = [o.get("name") for o in created_orders if o.get("name")]
+        tot_amount = sum(float(o.get("amount_total") or 0.0) for o in created_orders)
+        tot_untaxed = sum(float(o.get("amount_untaxed") or 0.0) for o in created_orders)
+        tot_tax = sum(float(o.get("amount_tax") or 0.0) for o in created_orders)
+        primary = created_orders[0]
+
+        return {
+            "success": True,
+            "action": "created",
+            "partitioned_by_supplier": True,
+            "orders": created_orders,
+            "order_id": primary.get("id"),
+            "name": " y ".join(names),
+            "partner_id": int(partner_id),
+            "amount_total": tot_amount,
+            "amount_untaxed": tot_untaxed,
+            "amount_tax": tot_tax,
+            "lines": all_lines,
+            "customer_name": primary.get("customer_name") or customer_name,
+        }
+
+    # Proveedor único (comportamiento estándar)
+    single_order = created_orders[0]
     return {
         "success": True,
         "action": "created",
-        "order_id": int(order_id),
-        "name": view_data.get("name"),
+        "partitioned_by_supplier": False,
+        "order_id": single_order.get("id"),
+        "name": single_order.get("name"),
         "partner_id": int(partner_id),
-        "amount_total": view_data.get("amount_total"),
-        "amount_untaxed": view_data.get("amount_untaxed"),
-        "amount_tax": view_data.get("amount_tax"),
-        "lines": view_data.get("lines", []),
-        "customer_name": view_data.get("customer_name") or customer_name,
+        "amount_total": single_order.get("amount_total"),
+        "amount_untaxed": single_order.get("amount_untaxed"),
+        "amount_tax": single_order.get("amount_tax"),
+        "lines": single_order.get("lines", []),
+        "customer_name": single_order.get("customer_name") or customer_name,
+        "supplier_id": single_order.get("supplier_id"),
+        "supplier_name": single_order.get("supplier_name"),
     }
 
 
@@ -490,6 +608,9 @@ async def odoo_update_quotation(
     order_id: Optional[int] = None,
     order_name: Optional[str] = None,
     items: Optional[List[Dict[str, Any]]] = None,
+    customer_name: Optional[str] = None,
+    partner_id: Optional[int] = None,
+    user_id: Optional[int] = None,
     client: Optional[OdooClient] = None,
 ) -> Dict[str, Any]:
     """Actualiza, añade o elimina líneas de una cotización en borrador existente en Odoo."""
@@ -531,7 +652,7 @@ async def odoo_update_quotation(
     if not order_records:
         return {
             "success": False,
-            "error": f"No se encontró la cotización con ID {order_id} en el sistema.",
+            "error": f"No se encontró la cotización {order_name or 'solicitada'} en el sistema.",
         }
 
     existing_line_ids = order_records[0].get("order_line", [])
@@ -577,14 +698,45 @@ async def odoo_update_quotation(
         if clean_name:
             existing_by_name.setdefault(clean_name, []).append(l)
 
-    items_clean = []
-    for it in (items or []):
-        it_dict = dict(it)
-        if "sku" not in it_dict or not it_dict["sku"]:
-            it_dict["sku"] = it_dict.get("product_name") or it_dict.get("name") or ""
-        if "qty" not in it_dict:
-            it_dict["qty"] = it_dict.get("quantity") or it_dict.get("cantidad") or 1.0
-        items_clean.append(it_dict)
+    items_clean = [normalize_item_input(it) for it in (items or [])]
+    items_clean = [it for it in items_clean if it.get("sku") or it.get("product_id")]
+
+    # Validación de proveedor único: un pedido no puede mezclar productos de más de un proveedor
+    from src.agent_service.tools.incentive_tools import get_sku_supplier_map, SUPPLIER_ALIASES
+    sku_supplier_map = {}
+    try:
+        sku_supplier_map = await get_sku_supplier_map(client=c)
+    except Exception as e:
+        logger.warning(f"No se pudo cargar mapa de proveedores en odoo_update_quotation: {e}")
+
+    existing_supplier_ids = set()
+    for clean_s in existing_by_sku.keys():
+        sid = sku_supplier_map.get(clean_s)
+        if sid:
+            existing_supplier_ids.add(sid)
+
+    if existing_supplier_ids:
+        primary_sid = next(iter(existing_supplier_ids))
+        existing_sup_info = SUPPLIER_ALIASES.get(primary_sid, {})
+        existing_sup_name = existing_sup_info.get("display_name") or existing_sup_info.get("name") or f"Proveedor {primary_sid}"
+        for it in items_clean:
+            act = str(it.get("action") or "add").lower()
+            if act in ("add", "set"):
+                it_sku = str(it.get("sku", "")).strip()
+                it_sid = sku_supplier_map.get(it_sku)
+                if it_sid and it_sid not in existing_supplier_ids:
+                    conflict_sup_info = SUPPLIER_ALIASES.get(it_sid, {})
+                    conflict_sup_name = conflict_sup_info.get("display_name") or conflict_sup_info.get("name") or f"Proveedor {it_sid}"
+                    order_label = order_records[0].get("name") or str(order_id)
+                    return {
+                        "success": False,
+                        "error": (
+                            f"No es posible agregar el producto '{it_sku}' a la cotización {order_label}. "
+                            f"Esta cotización corresponde a {existing_sup_name}, y cada pedido debe pertenecer exclusivamente a un solo proveedor. "
+                            f"Por favor crea un pedido separado para los productos de {conflict_sup_name}."
+                        ),
+                        "conflicting_supplier": conflict_sup_name,
+                    }
 
     skus_to_resolve = [str(it["sku"]).strip() for it in items_clean if not it.get("product_id") and it.get("sku")]
 
@@ -699,14 +851,39 @@ async def odoo_update_quotation(
                     line_vals["price_unit"] = float(resolved_skus_map[op_sku].price)
                 order_lines.append((0, 0, line_vals))
 
+    write_vals: Dict[str, Any] = {}
     if order_lines:
+        write_vals["order_line"] = order_lines
+
+    # Soporte de reasignación de cliente en la orden existente
+    target_p_id = partner_id
+    if not target_p_id and customer_name:
+        from src.agent_service.tools.contact_tools import (
+            odoo_list_current_customers,
+            odoo_upsert_customer,
+        )
+        clean_cname = str(customer_name).strip()
+        try:
+            found_c = await odoo_list_current_customers(name=clean_cname, user_id=int(user_id or 5), client=c)
+            if found_c:
+                target_p_id = found_c[0].get("id")
+            else:
+                ups = await odoo_upsert_customer(name=clean_cname, user_id=int(user_id or 5), client=c)
+                target_p_id = ups.get("id")
+        except Exception as e:
+            logger.warning(f"Error resolviendo cliente '{customer_name}' en odoo_update_quotation: {e}")
+
+    if target_p_id:
+        write_vals["partner_id"] = int(target_p_id)
+
+    if write_vals:
         call_payload = {
             "jsonrpc": "2.0",
             "method": "call",
             "params": {
                 "model": "sale.order",
                 "method": "write",
-                "args": [[int(order_id)], {"order_line": order_lines}],
+                "args": [[int(order_id)], write_vals],
                 "kwargs": {},
             },
             "id": 305,

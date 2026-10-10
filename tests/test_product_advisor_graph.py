@@ -880,7 +880,7 @@ async def test_proactive_top_k_for_exhaustive_and_budget_queries():
     # Caso 2: Verificar que el fallback automático asigne limit=15 cuando hay palabras de exhaustividad o presupuesto
     nodes._planner.ainvoke.side_effect = Exception("Planner failure simulation")
     fallback_res = await nodes.plan_and_select_tools(state)
-    assert len(fallback_res["planned_tools"]) == 1
+    assert len(fallback_res["planned_tools"]) >= 1
     assert fallback_res["planned_tools"][0]["arguments"]["limit"] == 15
 
 

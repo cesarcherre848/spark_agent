@@ -3,12 +3,12 @@ src/agent_service/graph/sub_graphs/sales_manage/schemas.py - Esquemas Pydantic e
 """
 
 from typing import Optional, List, Dict, Any, Literal
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class SalesSKUItem(BaseModel):
-    """Ítem individual extraído de la consulta de ventas."""
-    sku: str = Field(description="Código de referencia comercial / SKU del producto, o nombre comercial si no se especificó SKU numérico (ej: '6189', '5104', 'Delineador', 'Sexy Glam').")
+    """Ítem individual extraído de la consulta de ventas. 'código' siempre se refiere al SKU comercial."""
+    sku: str = Field(description="Código de referencia comercial / SKU del producto, o nombre comercial si no se especificó SKU numérico (ej: '6189', '5104', 'Delineador', 'Sexy Glam'). NUNCA un ID técnico de base de datos.")
     qty: float = Field(default=1.0, description="Cantidad de unidades referenciadas.")
     price_unit: Optional[float] = Field(default=None, description="Precio unitario acordado si se especificó.")
     action: Literal["add", "set", "remove", "subtract"] = Field(
@@ -20,6 +20,46 @@ class SalesSKUItem(BaseModel):
             "'subtract': Para restar, quitar o reducir cierta cantidad de unidades (ej: 'elimina 2 items de 6189', 'resta 1 unidad', 'quita 2')."
         ),
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_sku_fields(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            raw_sku = (
+                data.get("sku")
+                or data.get("product_sku")
+                or data.get("code")
+                or data.get("codigo")
+                or data.get("default_code")
+                or data.get("reference")
+            )
+            raw_pid = data.get("product_id")
+            if not raw_sku and raw_pid is not None:
+                pid_str = str(raw_pid).strip()
+                # Si el LLM envió el SKU o nombre en product_id
+                raw_sku = pid_str
+
+            if not raw_sku:
+                raw_sku = data.get("product_name") or data.get("name") or ""
+
+            data["sku"] = str(raw_sku).strip()
+
+            raw_qty = (
+                data.get("qty")
+                if "qty" in data and data["qty"] is not None
+                else (
+                    data.get("quantity")
+                    or data.get("cantidad")
+                    or data.get("unidades")
+                    or 1.0
+                )
+            )
+            try:
+                data["qty"] = float(raw_qty)
+            except (ValueError, TypeError):
+                data["qty"] = 1.0
+
+        return data
 
 
 class SalesExtractionResult(BaseModel):

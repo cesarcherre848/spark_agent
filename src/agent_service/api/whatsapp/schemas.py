@@ -15,26 +15,38 @@ class MetaTextBody(BaseModel):
     body: str
 
 
+class MetaAudioBody(BaseModel):
+    """Contenido del mensaje de audio enviado por el usuario."""
+    id: str
+    mime_type: Optional[str] = "audio/ogg"
+    sha256: Optional[str] = None
+    voice: Optional[bool] = None
+
+
 class MetaMessage(BaseModel):
     """Representación de un mensaje individual en el payload de Meta."""
     model_config = ConfigDict(extra="ignore")
 
-    from_number: str = Field(..., alias="from")
+    from_number: Optional[str] = Field(None, alias="from")
+    from_user_id: Optional[str] = None
     id: str
     timestamp: str
     type: str = "text"
     text: Optional[MetaTextBody] = None
+    audio: Optional[MetaAudioBody] = None
 
 
 class MetaContactProfile(BaseModel):
     """Perfil del contacto que interactúa."""
     name: Optional[str] = None
+    username: Optional[str] = None
 
 
 class MetaContact(BaseModel):
     """Contacto remitente en la plataforma de WhatsApp."""
     profile: Optional[MetaContactProfile] = None
-    wa_id: str
+    wa_id: Optional[str] = None
+    user_id: Optional[str] = None
 
 
 class MetaStatus(BaseModel):

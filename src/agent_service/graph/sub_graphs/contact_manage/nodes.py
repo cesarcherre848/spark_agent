@@ -218,7 +218,7 @@ class ContactManageNodes(BaseSynthesizerNode):
         """Rama Upsert: feedback usuario (accept/reject) mediante Human-in-the-Loop interrupt."""
         var_child_runnable_config.set(config)
         candidates = state.get("current_candidates", [])
-        cand_desc = ", ".join(f"[{c['id']}] {c['name']} (Tel: {c.get('phone', 'N/A')})" for c in candidates)
+        cand_desc = ", ".join(f"{c['name']} (Tel: {c.get('phone', 'N/A')})" for c in candidates)
         question = HITLDialogTemplates.duplicate_contact_question(cand_desc)
 
         user_resume = interrupt({
@@ -244,7 +244,7 @@ class ContactManageNodes(BaseSynthesizerNode):
     ) -> dict:
         """Rama Remove: feedback usuario (confirmación de eliminación/archivado con HITL)."""
         var_child_runnable_config.set(config)
-        target_name = state.get("extracted_name") or f"ID {state.get('target_contact_id')}"
+        target_name = state.get("extracted_name") or "el cliente solicitado"
         question = HITLDialogTemplates.remove_contact_question(target_name)
 
         user_resume = interrupt({
@@ -337,7 +337,7 @@ class ContactManageNodes(BaseSynthesizerNode):
             if customers:
                 context_lines.append(f"Clientes encontrados en cartera ({len(customers)}):")
                 for c in customers:
-                    context_lines.append(f"- ID {c['id']}: {c['name']} | Teléfono: {c.get('phone') or 'Sin teléfono registrado'}")
+                    context_lines.append(f"- {c['name']} | Teléfono: {c.get('phone') or 'Sin teléfono registrado'}")
             else:
                 context_lines.append("No se encontraron clientes asignados en tu cartera comercial.")
 
@@ -345,8 +345,8 @@ class ContactManageNodes(BaseSynthesizerNode):
             if op_result and op_result.get("success"):
                 act_str = "actualizado" if op_result.get("action") == "updated" else "creado exitosamente"
                 context_lines.append(
-                    f"Cliente {act_str} en el sistema: ID {op_result.get('id')} - {op_result.get('name')} "
-                    f"(Tel: {op_result.get('phone', 'N/A')}) asignado a tu usuario."
+                    f"Cliente {act_str} en el sistema: {op_result.get('name')} "
+                    f"(Tel: {op_result.get('phone', 'N/A')}) asignado a tu cartera."
                 )
             elif not upsert_confirmed:
                 context_lines.append("Operación cancelada por el usuario tras la alerta de duplicados.")
@@ -355,7 +355,7 @@ class ContactManageNodes(BaseSynthesizerNode):
 
         elif action == "remove":
             if op_result and op_result.get("success"):
-                context_lines.append(f"El cliente ID {op_result.get('id')} ha sido archivado exitosamente en la cartera.")
+                context_lines.append(f"El cliente {op_result.get('name') or 'solicitado'} ha sido archivado exitosamente en tu cartera.")
             elif not remove_confirmed:
                 context_lines.append("Eliminación/archivado cancelado por el usuario.")
             elif op_result and not op_result.get("success"):
@@ -376,7 +376,7 @@ class ContactManageNodes(BaseSynthesizerNode):
             - Informa con claridad y cordialidad ejecutiva el resultado de la gestión de clientes.
             - Presenta los clientes ordenadamente con viñetas claras si se solicitaron listas, o confirma las altas/modificaciones con sus nombres y teléfonos.
             - NUNCA menciones términos de backend como 'ERP' u 'Odoo'.
-            - NUNCA reveles identificadores técnicos internos como 'user_id' o 'partner_id'.
+            - NUNCA reveles identificadores técnicos internos como 'user_id', 'partner_id' ni 'contact_id'. Los usuarios de negocio no conocen estos IDs.
 
             {channel_instructions}
             """,

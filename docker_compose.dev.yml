@@ -13,6 +13,7 @@ services:
       - HF_HOME=/root/.cache/huggingface
       - SENTENCE_TRANSFORMERS_HOME=/root/.cache/huggingface
       - EMBEDDING_CACHE_DIR=/root/.cache/huggingface
+      - WHISPER_SERVER_URL=http://whisper_server:9000
     volumes:
       - .:/app
       - embedding_cache:/root/.cache/huggingface
@@ -24,7 +25,28 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  # ── Servidor whisper.cpp ──
+  # El entrypoint.sh descarga el modelo al volumen en el primer arranque
+  # y lo omite en arranques posteriores. Puerto 9001 expuesto para tests.
+  whisper:
+    image: ghcr.io/ggerganov/whisper.cpp:main
+    container_name: whisper_server
+    ports:
+      - "9001:9000"
+    volumes:
+      - whisper_models:/models
+      - ./scripts/whisper-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+
 volumes:
   embedding_cache:
     name: spark_agent_embedding_cache
-
+  whisper_models:
+    name: spark_agent_whisper_models

@@ -134,6 +134,7 @@ class MainGraphState(TypedDict, total=False):
     partner_id: Optional[int]
     target_customer_name: Optional[str]
     target_order_name: Optional[str]
+    session_orders: Optional[Dict[str, Dict[str, Any]]]
 
     # Pasamanos de sales_incentives:
     active_incentives: Optional[List[Dict[str, Any]]]

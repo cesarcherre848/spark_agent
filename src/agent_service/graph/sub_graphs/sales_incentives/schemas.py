@@ -21,7 +21,7 @@ class SuggestedProductCombo(BaseModel):
 
 class IncentiveMilestone(BaseModel):
     """Objetivo o hito comercial a alcanzar dentro de la campaña."""
-    milestone_name: str = Field(description="Nombre del hito (ej: 'Salto a 30% de Descuento', 'Colonia Soy Sexy Gratis', 'Tarjeta Visa S/ 700').")
+    milestone_name: str = Field(description="Nombre del hito (ej: 'Salto a 30% de Descuento', 'Colonia Floral de Regalo', 'Tarjeta Visa S/ 700').")
     supplier_name: Optional[str] = Field(None, description="Marca o proveedor asociado (ej. 'Unique S.A.', 'CETCO S.A.').")
     target_type: Literal["discount_tier", "gift_product", "cash_card", "rappel"] = Field(
         description="Tipo de beneficio de incentivo."

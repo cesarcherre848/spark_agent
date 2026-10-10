@@ -13,6 +13,7 @@ from src.agent_service.tools.product_tools import (
     create_get_product_by_skus_tool,
     create_get_cross_sell_recommendations_tool,
     create_filter_and_sort_products_tool,
+    create_rerank_and_filter_candidates_tool,
     create_get_customer_purchase_history_tool,
 )
 
@@ -32,6 +33,7 @@ def build_advisor_tools_registry(
         odoo_client=odoo_client,
     )
     filter_sort = create_filter_and_sort_products_tool()
+    rerank_filter = create_rerank_and_filter_candidates_tool()
     purchase_history = create_get_customer_purchase_history_tool(odoo_client=odoo_client)
 
     from src.agent_service.tools.incentive_tools import get_active_incentive_targets
@@ -44,6 +46,7 @@ def build_advisor_tools_registry(
         "get_product_odoo_details": get_details,
         "get_cross_sell_recommendations": cross_sell,
         "filter_and_sort_products": filter_sort,
+        "rerank_and_filter_candidates": rerank_filter,
         "get_customer_purchase_history": purchase_history,
         "get_active_incentive_targets": get_active_incentive_targets_wrapper,
     }

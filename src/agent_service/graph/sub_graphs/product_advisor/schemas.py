@@ -14,13 +14,55 @@ class AdvisorToolCall(BaseModel):
         "get_product_odoo_details",
         "get_cross_sell_recommendations",
         "filter_and_sort_products",
+        "rerank_and_filter_candidates",
         "get_customer_purchase_history",
+        "get_active_incentive_targets",
     ] = Field(description="Nombre exacto de la herramienta a invocar.")
     arguments: Dict[str, Any] = Field(
         default_factory=dict,
         description="Argumentos pasados a la herramienta.",
     )
     purpose: str = Field(description="Razón y objetivo por el cual se invoca esta herramienta.")
+
+
+class CustomerIntentSpec(BaseModel):
+    """Especificación semántica estructurada de intención para modular búsqueda y reranking dinámico."""
+    target_gender: Optional[Literal["female", "male", "unisex", "kids"]] = Field(
+        default=None,
+        description="Género inferido del destinatario ('female', 'male', 'unisex', 'kids').",
+    )
+    target_age: Optional[int] = Field(
+        default=None,
+        description="Edad numérica del cliente o destinatario si fue mencionada (ej: 50, 32, 18, etc.).",
+    )
+    target_age_group: Optional[Literal["kids", "teen_young", "adult", "mature"]] = Field(
+        default=None,
+        description="Etapa de vida inferida a partir de la edad o contexto: 'kids' (<13), 'teen_young' (13-24), 'adult' (25-44), 'mature' (>=45).",
+    )
+    anatomical_focus: Optional[Literal["facial", "body", "hair", "fragrance", "makeup"]] = Field(
+        default=None,
+        description="Enfoque de producto: 'facial' (rostro), 'body' (cuerpo), 'hair' (cabello), 'fragrance' (colonia/perfume), 'makeup' (maquillaje).",
+    )
+    brand_preference: Optional[str] = Field(
+        default=None,
+        description="Marca preferida si fue indicada (ej: 'Yanbal', 'Ésika').",
+    )
+    product_profile: Optional[str] = Field(
+        default=None,
+        description="Perfil o estilo buscado (ej: 'fresca_diario', 'citrica', 'antiarrugas', 'hidratante').",
+    )
+    skin_type: Optional[str] = Field(
+        default=None,
+        description="Tipo de piel (ej: 'mixta', 'grasa', 'seca', 'sensible').",
+    )
+    excluded_targets: List[str] = Field(
+        default_factory=list,
+        description="Perfiles incompatibles a excluir (ej: ['juvenil_teen', 'masculino', 'corporal']).",
+    )
+    max_price: Optional[float] = Field(
+        default=None,
+        description="Tope de presupuesto si el usuario indicó un límite.",
+    )
 
 
 class AdvisorPlan(BaseModel):
@@ -36,6 +78,10 @@ class AdvisorPlan(BaseModel):
     ] = Field(
         default="direct_search",
         description="Estrategia general adoptada para responder a la necesidad.",
+    )
+    intent_spec: Optional[CustomerIntentSpec] = Field(
+        default=None,
+        description="Perfil de intención semántica estructurada extraído para guiar búsqueda y reranking.",
     )
     tool_calls: List[AdvisorToolCall] = Field(
         default_factory=list,
@@ -79,13 +125,31 @@ class QualityRubricEvaluation(BaseModel):
         le=10.0,
         description="Puntaje de 1 a 10: ¿La respuesta es 100% clara, sin afirmaciones ambiguas ni mezcla errónea de marcas/campañas ante referencias de seguimiento ('esto a qué catálogo pertenece')?",
     )
+    intent_fulfillment_score: float = Field(
+        default=8.0,
+        ge=1.0,
+        le=10.0,
+        description="Puntaje de 1 a 10: ¿La respuesta cumple fielmente con el cambio o preferencia solicitada en este turno (ej. menor precio que el turno previo o cobertura de categorías solicitadas)?",
+    )
+    criteria_clarity_score: float = Field(
+        default=8.0,
+        ge=1.0,
+        le=10.0,
+        description="Puntaje de 1 a 10: ¿El criterio de la consulta está 100% claro? Si el criterio es ambiguo o relativo con disyuntivas marcadas en catálogo, califica < 7.0.",
+    )
     is_approved: bool = Field(
         ...,
         description="True si todos los criterios son >= 7.0 y el promedio es >= 8.0.",
     )
-    reflection_action: Literal["approve", "refine_synthesis", "replan_tools"] = Field(
+    reflection_action: Literal[
+        "approve",
+        "refine_synthesis",
+        "re_rerank_with_feedback",
+        "replan_tools",
+        "ask_clarification",
+    ] = Field(
         default="approve",
-        description="Acción de reflexión: 'approve' si pasa; 'refine_synthesis' si los datos son válidos pero la redacción es ambigua o imprecisa; 'replan_tools' si faltan datos de catálogo.",
+        description="Acción de reflexión: 'approve' si pasa; 'refine_synthesis' si solo requiere ajuste de redacción/formato; 're_rerank_with_feedback' para re-ejecutar el reranker con feedback semántico (Medium Loop); 'replan_tools' si faltan datos en catálogo (Slow Loop); 'ask_clarification' si el criterio es ambiguo o hay conflicto de catálogo.",
     )
     critique: Optional[str] = Field(
         default=None,

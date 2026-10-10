@@ -87,12 +87,34 @@ class BaseSynthesizerNode:
 
     @classmethod
     def format_products_context(cls, products: List[Any], max_desc_len: int = 250) -> str:
-        """Formatea de forma universal una lista de productos (Document o dict) en texto conciso para inyectar en prompts."""
+        """Formatea de forma universal una lista de productos (Document, dict o ProductCanonicalFamily)
+        en texto conciso y libre de ambigüedades de números de página para prevenir alucinaciones de SKU."""
         if not products:
             return "No se encontraron productos disponibles en el catálogo."
 
         formatted_lines = []
         for idx, item in enumerate(products, start=1):
+            if hasattr(item, "family_name") and hasattr(item, "variants"):
+                # Estructura jerárquica de ProductCanonicalFamily
+                fam_name = getattr(item, "family_name") or "Producto"
+                marca = getattr(item, "marca", "") or ""
+                summary = (getattr(item, "summary_description", "") or "")[:max_desc_len].strip()
+                marca_str = f" (Marca: {marca})" if marca else ""
+                lines = [f"CONCEPTO / FAMILIA: {fam_name}{marca_str}"]
+                if summary:
+                    lines.append(f"  Descripción general: {summary}")
+                lines.append("  FACETAS / VARIANTES DISPONIBLES:")
+                for var in getattr(item, "variants", []):
+                    v_name = getattr(var, "name", "")
+                    v_sku = getattr(var, "sku", "")
+                    v_price = getattr(var, "price", None)
+                    v_curr = getattr(var, "currency", "PEN")
+                    v_attr = getattr(var, "attribute_details", "")
+                    p_str = cls.format_currency(v_price, currency=v_curr) if v_price is not None else "Consultar"
+                    lines.append(f"  • {v_name} | SKU OFICIAL: {v_sku} | Precio: {p_str} | Detalle: {v_attr}")
+                formatted_lines.append("\n".join(lines))
+                continue
+
             if isinstance(item, Document):
                 meta = item.metadata or {}
                 desc = (item.page_content or "")[:max_desc_len].strip()
@@ -117,22 +139,27 @@ class BaseSynthesizerNode:
             else:
                 continue
 
-            sku_tag = f" [SKU: {sku}]" if sku else ""
-            meta_tags = []
+            sku_str = f"SKU OFICIAL: {sku}" if sku else "SKU: No disponible"
+            meta_details = []
             if marca:
-                meta_tags.append(f"Marca: {marca}")
+                meta_details.append(f"Marca: {marca}")
             if vendor_name and str(vendor_name).strip().lower() != str(marca or "").strip().lower():
-                meta_tags.append(f"Proveedor: {vendor_name}")
+                meta_details.append(f"Proveedor: {vendor_name}")
             if edicion:
-                meta_tags.append(f"Campaña {edicion}")
+                meta_details.append(f"Campaña: {edicion}")
             if pagina is not None:
-                meta_tags.append(f"Pág. {pagina}")
+                # Sin corchetes para no confundir al LLM con SKUs
+                meta_details.append(f"Página de catálogo: {pagina}")
             if price is not None:
                 price_str = cls.format_currency(price, currency=currency)
-                meta_tags.append(f"Precio: {price_str}")
+                meta_details.append(f"Precio: {price_str}")
 
-            tags_str = f" [{ ' | '.join(meta_tags) }]" if meta_tags else ""
-            formatted_lines.append(f"[{idx}]{sku_tag} {name}{tags_str}\n    Detalle: {desc}")
+            meta_str = " | ".join(meta_details)
+            formatted_lines.append(
+                f"PRODUCTO: {name}\n"
+                f"  • {sku_str} | {meta_str}\n"
+                f"  • Detalle: {desc}"
+            )
 
         return "\n\n".join(formatted_lines)
 
@@ -183,7 +210,8 @@ ESTRUCTURA Y AGRUPACIÓN DE PRODUCTOS:
 - ESTRUCTURA DE CADA VIÑETA:
   {bullet_example}
 {newline_rule}
-- CÓDIGO SKU: Obligatorio si está disponible en los datos, siempre {sku_format}.
+- CÓDIGO SKU (GROUNDING ESTRICTO): Obligatorio si está disponible en los datos, siempre {sku_format}.
+  REGLA DE ORO: El SKU es ÚNICAMENTE el código oficial indicado en 'SKU OFICIAL:'. Queda TERMINANTEMENTE PROHIBIDO inventar códigos, usar números de página de catálogo o números de índice como SKUs.
 - PRECIOS: Expresa siempre los montos en moneda nacional como 'S/.' (ej: 'S/. 35.00'). NUNCA inventes precios ni códigos SKU ausentes en los productos proporcionados.
 - Si el catálogo no cuenta con opciones exactas, sé cortés, transparente y ofrece la alternativa disponible más cercana.
 """.strip()
