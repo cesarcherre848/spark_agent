@@ -26,6 +26,8 @@ from src.agent_service.tools.incentive_tools import (
     resolve_supplier_sales_metrics,
     detect_target_supplier,
     get_sku_supplier_map,
+    get_supplier_default_campaign,
+    detect_campaign_from_query,
     SUPPLIER_ALIASES,
 )
 from src.agent_service.tools.sales_tools import odoo_list_sales_orders
@@ -69,6 +71,12 @@ class SalesIncentivesNodes(BaseSynthesizerNode):
         detected_sid = target_meta["id"] if target_meta else state.get("supplier_id")
         detected_sname = target_meta["name"] if target_meta else state.get("supplier_name")
 
+        # Detección de campaña (explícita en consulta/estado o por defecto del proveedor)
+        explicit_campaign = detect_campaign_from_query(raw_query) or state.get("campaign")
+        default_campaign = get_supplier_default_campaign(detected_sid)
+        target_campaign = explicit_campaign or default_campaign
+        metadata_filters = state.get("metadata_filters")
+
         # 1. Obtener órdenes actuales del vendedor
         try:
             orders_data = await self._list_orders_tool(user_id=user_id)
@@ -76,9 +84,20 @@ class SalesIncentivesNodes(BaseSynthesizerNode):
             logger.warning(f"[SalesIncentives] Error al consultar órdenes en Odoo: {e}")
             orders_data = {"draft": [], "sale": [], "cancel": []}
 
-        # 2. Consultar incentivos vigentes reales en Odoo (CERO datos inventados)
+        # 2. Consultar incentivos vigentes reales en Odoo (CERO datos inventados, con soporte de campaña y metadata)
         try:
-            incentives = await self._get_incentives_tool(only_active=True)
+            import inspect
+            sig = inspect.signature(self._get_incentives_tool)
+            kwargs_get: Dict[str, Any] = {"only_active": True}
+            if "campaign" in sig.parameters and target_campaign:
+                kwargs_get["campaign"] = target_campaign
+            if "metadata_filters" in sig.parameters and metadata_filters:
+                kwargs_get["metadata_filters"] = metadata_filters
+            if "supplier_id" in sig.parameters and detected_sid is not None:
+                kwargs_get["supplier_id"] = detected_sid
+            if "use_supplier_default_campaign" in sig.parameters:
+                kwargs_get["use_supplier_default_campaign"] = True
+            incentives = await self._get_incentives_tool(**kwargs_get)
         except Exception as e:
             logger.warning(f"[SalesIncentives] Error al consultar incentivos en Odoo: {e}")
             incentives = []
@@ -116,6 +135,9 @@ class SalesIncentivesNodes(BaseSynthesizerNode):
             "supplier_id": detected_sid,
             "supplier_name": detected_sname,
             "target_supplier": target_meta,
+            "campaign": target_campaign,
+            "default_campaign": default_campaign,
+            "metadata_filters": metadata_filters,
             "orders_data": orders_data,
             "active_incentives": incentives,
             "sales_trends": trends,
@@ -171,10 +193,15 @@ class SalesIncentivesNodes(BaseSynthesizerNode):
             """
 
         # Preparar listado detallado de incentivos reales en Odoo
+        campaign_info = state.get("campaign")
         formatted_plans = []
         for p in active_incentives:
+            meta = p.get("metadata") or {}
+            camp_tag = meta.get("campaign") or campaign_info or "Vigente"
+            cat_tag = meta.get("category") or "general"
+            skus_str = f", SKUs: {', '.join(meta.get('skus', []))}" if meta.get("skus") else ""
             formatted_plans.append(
-                f"- [ID {p.get('id')}] [{p.get('supplier_name', 'Odoo')}] {p.get('title') or p.get('name')}\n"
+                f"- [{p.get('supplier_name', 'Odoo')}] [Campaña {camp_tag} | {cat_tag}{skus_str}] {p.get('title') or p.get('name')}\n"
                 f"  Beneficio: {p.get('description', '')}\n"
                 f"  Condiciones: {p.get('observations', '')}"
             )
@@ -211,7 +238,7 @@ class SalesIncentivesNodes(BaseSynthesizerNode):
            - Si la consulta es INFORMATIVA sobre premios o el incentivo más grande (ej: "¿cuál es el incentivo más grande que tiene Yanbal ahora?"):
              * Tu prioridad absoluta es responder DIRECTAMENTE a la pregunta en `direct_answer`.
              * Revisa la lista de PLANES ACTIVOS EN ODOO para esa marca e identifica el incentivo de mayor valor económico y comercial:
-               Ejemplo en Yanbal: El incentivo de mayor valor es el programa GanaMás Nivel 4 Bicampaña (Opción 2), que premia con una Tarjeta prepago Visa Yanbal cargada con S/. 700.00 netos de saldo (o la Opción 1 con Tarjeta Visa de S/. 500 + Set de Cuchillos Belwer de 15 piezas por acumular pedidos de S/. 3,400 en C9 y S/. 3,400 en C10). También destaca la Escala Comercial del 35% de descuento a partir de S/. 1,500.
+               Ejemplo en Yanbal: El incentivo de mayor valor es el programa GanaMás Nivel 4 Bicampaña (Opción 2), que premia con un abono directo en billetera digital (Yape, Plin, Bim, Prex, Dale o Ligo) de S/. 700.00 netos de saldo (o la Opción 1 acumulable con abono digital de S/. 500.00 + Set de Vajilla Colección Sienna de 41 piezas para 8 personas por acumular pedidos de S/. 3,500 en C11 y S/. 3,500 en C12). También destaca la Escala Comercial del 35% de descuento a partir de S/. 1,500.00.
              * NO evasivas ni desvíos: responde primero y con claridad a la pregunta sobre el premio mayor, y luego en `summary` motiva al vendedor a conquistarlo.
            - Si la consulta es sobre DIAGNÓSTICO DE BRECHAS (ej: "¿cuánto me falta para subir de escala?"):
              * Analiza el avance en soles, la brecha hacia el siguiente escalón y sugiere combos según política ε-greedy ({int((1-epsilon)*100)}% explotación / {int(epsilon*100)}% exploración).

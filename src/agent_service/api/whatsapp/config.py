@@ -30,6 +30,9 @@ class WhatsAppSettings:
     delay_warning_seconds: float = float(os.getenv("WHATSAPP_DELAY_WARNING_SECONDS", "60.0"))
     delay_warning_temperature: float = float(os.getenv("WHATSAPP_DELAY_WARNING_TEMPERATURE", "0.85"))
 
+    # TTL de memoria de corto plazo de sesión conversacional (24 horas por defecto)
+    session_ttl_seconds: float = float(os.getenv("WHATSAPP_SESSION_TTL_SECONDS", "86400.0"))
+
 
 def get_whatsapp_settings() -> WhatsAppSettings:
     """Obtiene la configuración actual de WhatsApp."""

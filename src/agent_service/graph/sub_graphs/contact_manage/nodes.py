@@ -75,15 +75,22 @@ class ContactManageNodes(BaseSynthesizerNode):
 
         system_prompt = """
             Eres un asistente especializado en CRM y gestión de cartera de clientes (Customers).
-            Tu labor es clasificar la acción solicitada por el vendedor y extraer los datos del cliente:
+            Tu labor es clasificar la acción solicitada por el vendedor y extraer los datos del o los clientes:
 
             1. 'action':
                 - 'list': si el vendedor pide ver, listar o consultar clientes de su cartera (ej. 'dame mis clientes', 'ver cartera', 'muéstrame a Juan').
-                - 'upsert': si el vendedor desea agregar, registrar, crear o modificar los datos de un cliente (ej. 'agrega el cliente Pedro', 'actualiza el teléfono de Carlos').
+                - 'upsert': si el vendedor desea agregar, registrar, crear o modificar los datos de uno o varios clientes (ej. 'agrega a Valeria y a Francia', 'registra a Pedro con 999111222').
                 - 'remove': si el vendedor pide eliminar, archivar o borrar un cliente de su cartera.
-            2. 'name': Nombre de la persona o razón social de la empresa cliente. Es OBLIGATORIO para upsert y remove (salvo que proporcione ID).
-            3. 'phones': Lista con los números telefónicos o celulares detectados (ej. ['987654321', '912345678']).
-            4. 'contact_id': ID numérico si el usuario hace referencia a un ID específico (ej. 'cliente ID 6').
+            2. 'customers': Lista exhaustiva de TODOS los clientes mencionados. Cada uno con:
+                - 'name': Nombre completo o razón social.
+                - 'phones': Lista de teléfonos o celulares pertenecientes a ese cliente.
+                - 'contact_id': ID numérico si se especifica.
+            3. 'name', 'phones', 'contact_id': Si se trata de un único cliente, llénalos también directamente.
+            
+            REGLA DE ELIPSIS Y CONTINUIDAD:
+            Si el vendedor dice algo como '¿Y a Francia?', 'Y Francia', 'agrega también a Carlos', y en el historial reciente se estaba registrando o hablando de clientes:
+            - Interpreta la acción como 'upsert' (o la acción correspondiente).
+            - Extrae a esa persona en la lista de 'customers' (ej. name: 'Francia').
         """
 
         user_prompt = f"Consulta o instrucción del vendedor:\n{raw_query}"
@@ -106,16 +113,42 @@ class ContactManageNodes(BaseSynthesizerNode):
                 logger.warning(f"[ContactManage] Error parseando dict de extracción ({exc}). Usando fallback.")
                 extraction = CustomerExtractionResult(action="list")
 
+        # Consolidar lista de clientes (customers)
+        extracted_customers_list: List[Dict[str, Any]] = []
+        raw_cust_list = getattr(extraction, "customers", []) or []
+        for c in raw_cust_list:
+            if isinstance(c, dict):
+                extracted_customers_list.append(c)
+            elif hasattr(c, "model_dump"):
+                extracted_customers_list.append(c.model_dump())
+
+        # Si no vino en la lista pero vino en el campo raíz 'name'
+        root_name = getattr(extraction, "name", None)
+        root_phones = getattr(extraction, "phones", []) or []
+        root_contact_id = getattr(extraction, "contact_id", None)
+        if not extracted_customers_list and root_name:
+            extracted_customers_list.append({
+                "name": root_name,
+                "phones": root_phones,
+                "contact_id": root_contact_id,
+            })
+        elif extracted_customers_list and not root_name:
+            root_name = extracted_customers_list[0].get("name")
+            root_phones = extracted_customers_list[0].get("phones", [])
+            root_contact_id = extracted_customers_list[0].get("contact_id")
+
         return {
             "contact_action": getattr(extraction, "action", "list"),
-            "extracted_name": getattr(extraction, "name", None),
-            "extracted_phones": getattr(extraction, "phones", []) or [],
-            "target_contact_id": getattr(extraction, "contact_id", None),
+            "extracted_name": root_name,
+            "extracted_phones": root_phones,
+            "target_contact_id": root_contact_id,
+            "extracted_customers": extracted_customers_list,
             "has_possible_duplicates": False,
             "duplicate_rationale": None,
             "upsert_confirmed": True,
             "remove_confirmed": True,
             "operation_result": None,
+            "batch_operation_results": [],
             "customers_list": [],
             "current_candidates": [],
         }
@@ -263,34 +296,66 @@ class ContactManageNodes(BaseSynthesizerNode):
         }
 
     async def upsert_customer_node(self, state: ContactManageState) -> dict:
-        """Rama Upsert: Invoca tool (upsert_contact) en Odoo."""
+        """Rama Upsert: Invoca tool (upsert_contact) en Odoo para todos los clientes extraídos."""
         user_id = int(state.get("user_id") or 5)
-        name = (state.get("extracted_name") or "").strip()
-        phones = state.get("extracted_phones", [])
-        contact_id = state.get("target_contact_id")
+        extracted_customers = state.get("extracted_customers") or []
 
-        if not name and not contact_id:
+        # Si no hay lista pero hay nombre individual en el estado raíz
+        if not extracted_customers:
+            name = (state.get("extracted_name") or "").strip()
+            phones = state.get("extracted_phones", [])
+            contact_id = state.get("target_contact_id")
+            if name or contact_id:
+                extracted_customers = [{
+                    "name": name,
+                    "phones": phones,
+                    "contact_id": contact_id,
+                }]
+
+        if not extracted_customers:
             return {
                 "operation_result": {
                     "success": False,
                     "error": HITLDialogTemplates.contact_required_name_error(),
-                }
+                },
+                "batch_operation_results": [],
             }
 
-        result = await self._upsert_customer_tool(
-            user_id=user_id,
-            name=name,
-            phones=phones,
-            contact_id=contact_id,
-        )
-        ret = {
-            "operation_result": result,
+        batch_results: List[Dict[str, Any]] = []
+        last_success_result: Optional[Dict[str, Any]] = None
+
+        for cust in extracted_customers:
+            c_name = (cust.get("name") or "").strip()
+            c_phones = cust.get("phones") or []
+            c_contact_id = cust.get("contact_id")
+            if not c_name and not c_contact_id:
+                continue
+
+            res = await self._upsert_customer_tool(
+                user_id=user_id,
+                name=c_name,
+                phones=c_phones,
+                contact_id=c_contact_id,
+            )
+            batch_results.append(res)
+            if res and isinstance(res, dict) and res.get("id"):
+                last_success_result = res
+
+        primary_result = batch_results[0] if batch_results else {
+            "success": False,
+            "error": HITLDialogTemplates.contact_required_name_error(),
         }
-        if result and isinstance(result, dict) and result.get("id"):
-            ret["active_customer"] = name or result.get("name")
-            ret["active_partner_id"] = result.get("id")
-            ret["customer_name"] = name or result.get("name")
-            ret["partner_id"] = result.get("id")
+
+        ret = {
+            "operation_result": primary_result,
+            "batch_operation_results": batch_results,
+        }
+        if last_success_result and last_success_result.get("id"):
+            active_name = last_success_result.get("name")
+            ret["active_customer"] = active_name
+            ret["active_partner_id"] = last_success_result.get("id")
+            ret["customer_name"] = active_name
+            ret["partner_id"] = last_success_result.get("id")
         return ret
 
     async def remove_customer_node(self, state: ContactManageState) -> dict:
@@ -328,6 +393,7 @@ class ContactManageNodes(BaseSynthesizerNode):
         action = state.get("contact_action", "list")
         customers = state.get("customers_list", [])
         op_result = state.get("operation_result")
+        batch_results = state.get("batch_operation_results") or []
         upsert_confirmed = state.get("upsert_confirmed", True)
         remove_confirmed = state.get("remove_confirmed", True)
 
@@ -342,7 +408,17 @@ class ContactManageNodes(BaseSynthesizerNode):
                 context_lines.append("No se encontraron clientes asignados en tu cartera comercial.")
 
         elif action == "upsert":
-            if op_result and op_result.get("success"):
+            if batch_results and len(batch_results) > 1:
+                context_lines.append(f"Se procesaron {len(batch_results)} clientes:")
+                for b_res in batch_results:
+                    if b_res.get("success"):
+                        act_str = "actualizado" if b_res.get("action") == "updated" else "creado exitosamente"
+                        context_lines.append(
+                            f"- {b_res.get('name')} (Tel: {b_res.get('phone', 'N/A')}): {act_str} en tu cartera."
+                        )
+                    else:
+                        context_lines.append(f"- Error al procesar {b_res.get('name', 'contacto')}: {b_res.get('error')}")
+            elif op_result and op_result.get("success"):
                 act_str = "actualizado" if op_result.get("action") == "updated" else "creado exitosamente"
                 context_lines.append(
                     f"Cliente {act_str} en el sistema: {op_result.get('name')} "

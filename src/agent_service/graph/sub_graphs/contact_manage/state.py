@@ -17,6 +17,7 @@ class ContactManageState(TypedDict, total=False):
     extracted_name: Optional[str]
     extracted_phones: List[str]
     target_contact_id: Optional[int]
+    extracted_customers: Optional[List[Dict[str, Any]]]
 
     # Rama List
     customers_list: List[Dict[str, Any]]
@@ -32,4 +33,5 @@ class ContactManageState(TypedDict, total=False):
 
     # Resultado y Síntesis final
     operation_result: Optional[Dict[str, Any]]
+    batch_operation_results: Optional[List[Dict[str, Any]]]
     final_response: Optional[str]

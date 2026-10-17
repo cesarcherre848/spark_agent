@@ -19,6 +19,11 @@ from src.agent_service.core.guardrails.rules import (
 )
 from src.agent_service.core.guardrails.evaluator import (
     evaluate_input_guardrail,
+    aevaluate_input_guardrail,
+)
+from src.agent_service.core.guardrails.llm_evaluator import (
+    LLMGuardrailEvaluator,
+    get_llm_guardrail_evaluator,
 )
 
 __all__ = [
@@ -31,7 +36,8 @@ __all__ = [
     "REFUSAL_BY_CATEGORY",
     "format_guardrail_refusal",
     "format_guardrail_warning",
-    "LAYA_GUARD_QUESTIONS",
-    "evaluate_laya_scores",
     "evaluate_input_guardrail",
+    "aevaluate_input_guardrail",
+    "LLMGuardrailEvaluator",
+    "get_llm_guardrail_evaluator",
 ]

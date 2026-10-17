@@ -13,11 +13,11 @@ SRC_DIR = "src"
 FORBIDDEN_PATTERNS = [
     (
         "Nombres de clientes de prueba en código",
-        re.compile(r"\b(silvana|dika|charito|renzo|miriam\s+pacheco)\b", re.IGNORECASE),
+        re.compile(r"\b(silvana|dika|charito|renzo|rosita|miriam\s+pacheco)\b", re.IGNORECASE),
     ),
     (
         "Teléfonos específicos en código ejecutable",
-        re.compile(r"\b(51975674799|51983689215|51953320946)\b"),
+        re.compile(r"\b(51975674799|51983689215|51953320946|51982061983)\b"),
     ),
     (
         "Submarcas específicas de catálogo o notas hardcodeadas en lógica",

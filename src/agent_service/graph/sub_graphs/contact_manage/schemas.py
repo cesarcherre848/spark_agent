@@ -2,6 +2,21 @@ from typing import Optional, List, Literal
 from pydantic import BaseModel, Field
 
 
+class CustomerItem(BaseModel):
+    """Información individual de un cliente en solicitudes por lote o unitarias."""
+    name: str = Field(
+        description="Nombre completo o razón social del cliente.",
+    )
+    phones: List[str] = Field(
+        default_factory=list,
+        description="Lista de números telefónicos o celulares detectados para este cliente.",
+    )
+    contact_id: Optional[int] = Field(
+        default=None,
+        description="ID numérico de Odoo si se hace referencia a un cliente específico.",
+    )
+
+
 class CustomerExtractionResult(BaseModel):
     """Extracción estructurada de la acción y datos del cliente."""
     action: Literal["list", "upsert", "remove"] = Field(
@@ -13,15 +28,19 @@ class CustomerExtractionResult(BaseModel):
     )
     name: Optional[str] = Field(
         default=None,
-        description="Nombre completo o razón social del cliente. Es obligatorio al crear o modificar.",
+        description="Nombre completo o razón social del cliente principal (o único).",
     )
     phones: List[str] = Field(
         default_factory=list,
-        description="Lista de números telefónicos o celulares proporcionados para el cliente.",
+        description="Lista de números telefónicos o celulares proporcionados para el cliente principal.",
     )
     contact_id: Optional[int] = Field(
         default=None,
         description="ID numérico de Odoo en caso de hacer referencia a un cliente específico existente.",
+    )
+    customers: List[CustomerItem] = Field(
+        default_factory=list,
+        description="Lista completa de todos los clientes a registrar o consultar cuando se solicitan múltiples.",
     )
 
 

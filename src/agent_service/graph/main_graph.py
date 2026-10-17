@@ -54,10 +54,12 @@ from src.agent_service.graph.sub_graphs.sales_incentives.graph import (
 from src.agent_service.soul import inject_soul, SoulRole
 from src.agent_service.core.guardrails import (
     evaluate_input_guardrail,
+    aevaluate_input_guardrail,
     format_guardrail_refusal,
     format_guardrail_warning,
     ViolationCategory,
     GuardrailAction,
+    GuardrailResult,
 )
 
 logger = logging.getLogger(__name__)
@@ -141,10 +143,33 @@ class MainGraphState(TypedDict, total=False):
     sales_trends: Optional[List[Dict[str, Any]]]
     gap_info: Optional[Dict[str, Any]]
 
+    # Control de contexto del Juez (Context Judge)
+    is_standalone: Optional[bool]
+    context_usefulness: Optional[Literal["fully_useful", "partially_useful", "irrelevant_or_obsolete"]]
+    relevant_context_summary: Optional[str]
+
 
 # ==============================================================================
-# 2. ESQUEMA DEL ENRUTADOR
+# 2. ESQUEMAS DEL ENRUTADOR Y JUEZ DE CONTEXTO
 # ==============================================================================
+class ContextJudgement(BaseModel):
+    """Veredicto del Juez de Contexto sobre la consulta actual frente al historial."""
+    is_standalone: bool = Field(
+        description="True si la consulta actual puede entenderse y responderse por sí sola sin depender del historial (inicia un tema nuevo, cambia de cliente o saluda tras inactividad)."
+    )
+    context_usefulness: Literal["fully_useful", "partially_useful", "irrelevant_or_obsolete"] = Field(
+        description="Grado de utilidad del historial previo para responder a la consulta actual."
+    )
+    relevant_context_summary: Optional[str] = Field(
+        default=None,
+        description="Resumen conciso del hecho, producto o cliente previo estrictamente necesario si context_usefulness no es irrelevant."
+    )
+    suggested_intent: Optional[Literal["advisor", "resolver", "contact", "sales", "incentives", "general"]] = Field(
+        default=None,
+        description="Intención sugerida tras el análisis contextual para orientar al router."
+    )
+
+
 class RouterDecision(BaseModel):
     """Clasificación estructurada de la consulta comercial."""
     intent: Literal["advisor", "resolver", "general", "contact", "sales", "out_of_scope", "rag", "recommender", "incentives"] = Field(
@@ -157,7 +182,7 @@ class RouterDecision(BaseModel):
 # 3. NODOS DEL GRAFO PRINCIPAL
 # ==============================================================================
 def create_input_guardrail_node():
-    """Crea el nodo de evaluación de Guardrail híbrido (Capa 1 Regex + Capa 2 Laya)."""
+    """Crea el nodo de evaluación de Guardrail híbrido (Capa 1 Regex + Capa 2 LLM)."""
     async def input_guardrail_node(state: MainGraphState) -> dict:
         raw_query = state.get("raw_query")
         if not raw_query and state.get("messages"):
@@ -167,24 +192,25 @@ def create_input_guardrail_node():
                     break
         raw_query = (raw_query or "").strip()
 
-        eval_result = evaluate_input_guardrail(raw_query)
+        eval_result = await aevaluate_input_guardrail(raw_query)
 
         if eval_result.is_blocked:
-            # Salvaguarda defensiva: si el bloqueo proviene de Capa 2 (Laya) pero la consulta contiene
-            # términos comerciales evidentes de catálogo, desactivar el falso positivo.
+            # Salvaguarda defensiva: si la consulta contiene términos comerciales evidentes
+            # de catálogo, clientes, pedidos o incentivos, desactivar falsos positivos de injection/out_of_scope.
             words = [w.strip("?,.:;!¡¿\"'()").lower() for w in raw_query.split() if w.strip("?,.:;!¡¿\"'()")]
             commercial_keywords = {
                 "esika", "essika", "ésika", "yanbal", "yambal", "unique", "cyzone", "lbel", "l'bel",
                 "precio", "precios", "cuanto", "cuánto", "marca", "marcas", "catalogo", "catálogo",
                 "opcion", "opciones", "perfume", "perfumes", "colonia", "colonias", "fragancia", "fragancias",
                 "labial", "labiales", "crema", "cremas", "maquillaje", "rimel", "mascara", "máscara",
-                "hombre", "hombres", "mujer", "mujeres", "comprar", "cotizar", "pedido", "producto", "productos"
+                "hombre", "hombres", "mujer", "mujeres", "comprar", "cotizar", "pedido", "producto", "productos",
+                "cliente", "clientes", "agregar", "anadir", "añadir", "nuevo", "nueva", "orden", "ordenes", "órdenes",
+                "ganamas", "ganamás", "meta", "metas", "incentivo", "incentivos", "premio", "premios", "comision", "comisiones", "bono", "bonos"
             }
             has_commercial_kw = any(w in commercial_keywords for w in words)
-            is_laya_block = "Laya" in (eval_result.reason or "")
-            if is_laya_block and has_commercial_kw:
+            if has_commercial_kw and eval_result.category in (ViolationCategory.PROMPT_INJECTION, ViolationCategory.OUT_OF_SCOPE):
                 logger.info(
-                    f"[Guardrail Graph] Desbloqueando falso positivo de Laya para consulta comercial: '{raw_query}'"
+                    f"[Guardrail Graph] Desbloqueando falso positivo para consulta comercial: '{raw_query}'"
                 )
                 eval_result = GuardrailResult(
                     action=GuardrailAction.ALLOW,
@@ -193,6 +219,19 @@ def create_input_guardrail_node():
                     category=ViolationCategory.NONE,
                     reason="Consulta comercial permitida por salvaguarda del grafo.",
                     scores=eval_result.scores,
+                )
+            elif eval_result.category == ViolationCategory.OUT_OF_SCOPE:
+                # out_of_scope jamás debe ser un bloqueo duro en el guardrail de entrada
+                logger.info(
+                    f"[Guardrail Graph] Desclasificando bloqueo out_of_scope a advertencia cordial: '{raw_query}'"
+                )
+                eval_result = GuardrailResult(
+                    action=GuardrailAction.WARN,
+                    is_blocked=False,
+                    is_warning=True,
+                    category=ViolationCategory.OUT_OF_SCOPE,
+                    reason=eval_result.reason,
+                    warning_message=format_guardrail_warning(ViolationCategory.OUT_OF_SCOPE),
                 )
 
         if eval_result.is_blocked:
@@ -222,7 +261,8 @@ def create_input_guardrail_node():
             commercial_keywords = {
                 "esika", "essika", "ésika", "yanbal", "yambal", "unique", "cyzone", "lbel", "l'bel",
                 "precio", "cuanto", "cuánto", "marca", "catalogo", "catálogo", "opcion", "opción",
-                "segundo", "primero", "tercero", "perfume", "labial", "crema", "rimel", "mascara"
+                "segundo", "primero", "tercero", "perfume", "labial", "crema", "rimel", "mascara",
+                "cliente", "clientes", "agregar", "nuevo", "nueva", "pedido", "orden", "ganamas", "meta", "bono"
             }
             has_commercial_kw = any(w in commercial_keywords for w in words)
             if eval_result.category == ViolationCategory.OUT_OF_SCOPE and (has_history or has_commercial_kw) and len(words) <= 8:
@@ -291,6 +331,88 @@ def create_guardrail_blocked_node():
     return guardrail_blocked_node
 
 
+def create_context_judge_node(llm: BaseChatModel):
+    """Crea el nodo Juez de Contexto que evalúa si la consulta actual es independiente o depende del historial."""
+    structured_judge = bind_structured_output(bind_temperature(llm, 0.0), ContextJudgement)
+
+    async def context_judge_node(state: MainGraphState) -> dict:
+        raw_query = state.get("raw_query")
+        if not raw_query and state.get("messages"):
+            for m in reversed(state["messages"]):
+                if isinstance(m, HumanMessage):
+                    raw_query = str(m.content)
+                    break
+        raw_query = (raw_query or "").strip()
+
+        messages = state.get("messages", [])
+        # Excluimos el mensaje actual para inspeccionar el historial previo
+        history_msgs = [m for m in messages if not (isinstance(m, HumanMessage) and str(m.content).strip() == raw_query)]
+
+        if not history_msgs:
+            logger.info(f"[ContextJudge] Sin historial previo. Consulta '{raw_query}' marcada como standalone.")
+            return {
+                "is_standalone": True,
+                "context_usefulness": "irrelevant_or_obsolete",
+                "relevant_context_summary": None,
+            }
+
+        trimmed_history = trim_messages(
+            history_msgs,
+            max_tokens=10,
+            strategy="last",
+            token_counter=len,
+        )
+
+        judge_prompt = """
+        Eres un Juez Crítico de Contexto Conversacional para un Asistente Comercial de Belleza y Distribución (Ésika, L'Bel, Cyzone, Yanbal).
+        Tu única misión es evaluar la 'Consulta actual' respecto al 'Historial de conversación reciente' para decidir si la consulta actual es INDEPENDIENTE o si DEPENDE del historial previo.
+
+        Criterios de Evaluación:
+        1. Consulta INDEPENDIENTE (is_standalone = True, context_usefulness = 'irrelevant_or_obsolete'):
+           - La consulta inicia un tema completamente nuevo, sin importar qué se habló antes.
+           - Menciona una entidad o acción explícita nueva (ej: 'Agregar Cliente Valeria Osores', 'mis clientes', '¿cómo van mis metas de ganamás?', 'cotizar a Juan Pérez', 'muéstrame labiales mate').
+           - Aunque antes se haya hablado de otro cliente o de pedidos pasados, si la consulta actual trae su propia acción o entidad, el historial previo es OBSOLETO e IRRELEVANTE.
+           - relevant_context_summary DEBE ser None.
+
+        2. Consulta DEPENDIENTE DE CONTEXTO (is_standalone = False, context_usefulness = 'fully_useful' o 'partially_useful'):
+           - Preguntas de seguimiento cortas, anáforas, elipsis o preguntas conectivas:
+             (ej: '¿y el segundo?', '¿cuánto cuesta ese?', 'cotízamelo', '¿y a Francia?', '¿y a Pedro?', '¿qué hay de Carlos?', '¿tienes en tono rojo?').
+           - ELIPSIS DE ENTIDAD/CLIENTE: Si la consulta anterior involucraba creación, consulta o cotización para una persona o producto, y la consulta actual pregunta por otra persona usando conectores elípticos (ej: '¿Y a Francia?', 'Y Francia', '¿y para Carmen?'), la consulta es DEPENDIENTE DE CONTEXTO para que el asistente continúe la acción correspondiente con la nueva persona.
+           - relevant_context_summary: resumen de 1 línea con la acción y entidad previa (ej. 'Acción previa de registro/gestión de clientes').
+
+        REGLA DE ORO ANTI-SOLAPAMIENTO:
+        Ante consultas completas que inicien explícitamente un tema nuevo, marca is_standalone = True y context_usefulness = 'irrelevant_or_obsolete'. Pero ante elipsis cortas de seguimiento ('¿Y a X?'), clasifícalas como DEPENDIENTES para continuar el flujo.
+        """
+
+        try:
+            verdict: Optional[ContextJudgement] = await structured_judge.ainvoke([
+                SystemMessage(content=judge_prompt),
+                *trimmed_history,
+                HumanMessage(content=f"Consulta actual: {raw_query}"),
+            ])
+            is_standalone = verdict.is_standalone if verdict else True
+            context_usefulness = verdict.context_usefulness if verdict else "irrelevant_or_obsolete"
+            summary = verdict.relevant_context_summary if verdict else None
+        except Exception as exc:
+            logger.warning(f"[ContextJudge] Fallback ante error en Juez LLM: {exc}")
+            is_standalone = True
+            context_usefulness = "irrelevant_or_obsolete"
+            summary = None
+
+        logger.info(
+            f"[ContextJudge] Consulta: '{raw_query}' -> is_standalone={is_standalone}, "
+            f"usefulness={context_usefulness}, summary={summary}"
+        )
+
+        return {
+            "is_standalone": is_standalone,
+            "context_usefulness": context_usefulness,
+            "relevant_context_summary": summary,
+        }
+
+    return context_judge_node
+
+
 def create_router_node(llm: BaseChatModel):
     """Crea el nodo enrutador inteligente basado en LLM estructurado."""
     structured_router = bind_structured_output(bind_temperature(llm, 0.0), RouterDecision)
@@ -305,14 +427,32 @@ def create_router_node(llm: BaseChatModel):
         raw_query = (raw_query or "").strip()
         user_context = state.get("user_context")
 
-        trimmed_history = trim_messages(
-            state.get("messages", []),
-            max_tokens=15,
-            strategy="last",
-            token_counter=len,
-        )
+        is_standalone = state.get("is_standalone", True)
+        context_usefulness = state.get("context_usefulness", "irrelevant_or_obsolete")
+        relevant_context_summary = state.get("relevant_context_summary")
 
-        system_prompt = """
+        # Si el Juez determinó que la consulta es autónoma o el contexto previo es obsoleto/irrelevante,
+        # NO alimentamos el historial confuso al router para evitar solapamientos o sesgos (off-by-one).
+        if is_standalone or context_usefulness == "irrelevant_or_obsolete":
+            trimmed_history = []
+            context_note = (
+                "\n[AVISO DE CONTEXTO]: La consulta actual es completamente NUEVA e INDEPENDIENTE. "
+                "Cualquier conversación previa sobre otros clientes, productos o metas es OBSOLETA. "
+                "Clasifica EXCLUSIVAMENTE basándote en la consulta actual.\n"
+            )
+        else:
+            trimmed_history = trim_messages(
+                state.get("messages", []),
+                max_tokens=15,
+                strategy="last",
+                token_counter=len,
+            )
+            context_note = (
+                f"\n[AVISO DE CONTEXTO]: Consulta de seguimiento. Contexto previo relevante: {relevant_context_summary}\n"
+                if relevant_context_summary else ""
+            )
+
+        system_prompt = f"""
             Clasifica la consulta del usuario en exactamente una de estas 7 intenciones comerciales:
             1. 'advisor': Asesoría y catálogo comercial de productos (búsquedas, recomendaciones, sugerencias, rankings, existencias, ingredientes o presupuestos):
                - Búsqueda o existencia de productos (ej: 'dame todos los perfumes para hombre de Yanbal', '¿tienen labiales mate?', 'muéstrame opciones de cremas').
@@ -320,14 +460,18 @@ def create_router_node(llm: BaseChatModel):
                - Preguntas informativas de catálogo (ej: 'ingredientes de crema Bio Milk', 'componentes de fragancia Ohm').
                - Recomendaciones relacionales (cross-selling, up-selling o sustitutos).
             2. 'resolver': Cotización directa o precios/stock con códigos SKU numéricos específicos (ej: 'precio del SKU 1', 'cotiza 3 del SKU 5').
-            3. 'contact': Gestión de cartera de clientes comerciales (ej: 'mis clientes', 'agregar cliente Carlos').
+            3. 'contact': Gestión de cartera de clientes comerciales (ej: 'mis clientes', 'agregar cliente Carlos', 'agregar cliente Valeria Osores').
             4. 'sales': Gestión de pedidos, órdenes y cotizaciones comerciales (ej: 'mis pedidos', 'confirmar orden SO001', 'detalle del pedido de Janet', 'cómo van las órdenes de Carlos', 'cotizar a cliente').
-            5. 'incentives': Consulta de metas, avances de venta, comisiones, bonos, premios, escalas comerciales o planes de incentivos (ej: '¿cómo voy con mis metas?', '¿qué me falta para el bono?', '¿cuánto me falta para ganar la batidora o la tarjeta Visa?', '¿qué me conviene vender hoy para llegar al siguiente nivel de descuento?', 'planes de incentivos de Unique o Belcorp', 'mis comisiones').
+            5. 'incentives': Consulta de metas, avances de venta, comisiones, bonos, premios, escalas comerciales o planes de incentivos (ej: '¿cómo voy con mis metas?', '¿qué me falta para el bono?', '¿cuánto me falta para ganar la batidora o la tarjeta Visa?', '¿qué me conviene vender hoy para llegar al siguiente nivel de descuento?', 'planes de incentivos de Unique o Belcorp', 'mis comisiones', 'ganamas nivel 2').
             6. 'general': Saludos de cortesía, despedidas o preguntas sobre qué servicios puedes brindar.
             7. 'out_of_scope': Solicitud ajena al negocio (poemas, chistes, código/programación, tareas escolares, ciencias, consejos personales).
+
+            REGLA DE ELIPSIS CONTEXTUAL:
+            Si la consulta es una pregunta corta de seguimiento (ej: '¿Y a Francia?', '¿Y a Pedro?', '¿Y de María?', '¿Y qué hay de Carlos?') y el contexto previo inmediato trataba de creación o consulta de clientes ('contact') o de pedidos ('sales'), clasifícala en ESA MISMA intención ('contact' o 'sales'). NUNCA la clasifiques como 'out_of_scope' ni como país si puede ser el nombre de una persona en la gestión comercial.
+            {context_note}
         """
 
-        context_block = f"\nAntecedentes de memoria:\n{user_context}\n" if user_context else ""
+        context_block = f"\nAntecedentes de memoria a largo plazo:\n{user_context}\n" if (user_context and not is_standalone) else ""
         user_prompt = f"""
             {context_block}Consulta actual: {raw_query}
         """
@@ -423,9 +567,6 @@ def create_general_chat_node(llm: BaseChatModel):
         ])
 
         reply_text = extract_clean_text(response.content)
-        guardrail_warning = state.get("guardrail_warning")
-        if state.get("is_warning") and guardrail_warning and guardrail_warning not in reply_text:
-            reply_text = f"{guardrail_warning}\n\n{reply_text}"
 
         return BaseSynthesizerNode.format_final_response(reply_text, state)
 
@@ -479,9 +620,10 @@ def build_main_graph(
     """Construye y compila el Grafo Principal unificado con guardrails, memoria, router y subgrafos."""
     workflow = StateGraph(state_schema=MainGraphState)
 
-    # 0. Nodos de Guardrail
+    # 0. Nodos de Guardrail y Juez de Contexto
     input_guardrail = create_input_guardrail_node()
     guardrail_blocked = create_guardrail_blocked_node()
+    context_judge = create_context_judge_node(llm)
 
     # 1. Nodos de memoria
     mem_nodes = UserMemoryNodes(store=memory_store) if memory_store else None
@@ -513,6 +655,7 @@ def build_main_graph(
     # Registro de nodos en el grafo
     workflow.add_node("input_guardrail", input_guardrail)
     workflow.add_node("guardrail_blocked", guardrail_blocked)
+    workflow.add_node("context_judge", context_judge)
     workflow.add_node("retrieve_memory", retrieve_memory_wrapper)
     workflow.add_node("router", router_node)
     workflow.add_node("general_chat", general_node)
@@ -524,18 +667,19 @@ def build_main_graph(
     workflow.add_node("save_memory", save_memory_wrapper)
 
     # Flujo de ejecución:
-    # 1. Capa 1 Guardrail (Fast-Path Determinista al entrar)
+    # 1. Capa 1 y 2 Guardrail (Fast-Path Determinista + LLM Evaluator)
     workflow.add_edge(START, "input_guardrail")
     workflow.add_conditional_edges(
         "input_guardrail",
-        lambda s: "guardrail_blocked" if s.get("is_blocked") else "retrieve_memory",
+        lambda s: "guardrail_blocked" if s.get("is_blocked") else "context_judge",
         {
             "guardrail_blocked": "guardrail_blocked",
-            "retrieve_memory": "retrieve_memory",
+            "context_judge": "context_judge",
         },
     )
 
-    # 2. Memoria hacia Router
+    # 2. Context Judge hacia Recuperación de Memoria y Router
+    workflow.add_edge("context_judge", "retrieve_memory")
     workflow.add_edge("retrieve_memory", "router")
 
     # 3. Bifurcación condicional del router (incluye out_of_scope -> guardrail_blocked)

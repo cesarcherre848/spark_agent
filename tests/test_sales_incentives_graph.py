@@ -82,15 +82,25 @@ async def test_gather_context_and_trends_multibrand_detection(mock_llm):
         get_incentives_tool=mock_get_incentives,
     )
 
-    # 1. Consulta con marca Yanbal (con typo yambal)
+    # 1. Consulta con marca Yanbal (con typo yambal) -> default C11
     res_yanbal = await nodes.gather_context_and_trends_node({"raw_query": "cual es el incentiv9 mas grande que tiene yambal ahora ?"})
     assert res_yanbal["supplier_id"] == 9
+    assert res_yanbal["campaign"] == "C11"
+    assert res_yanbal["default_campaign"] == "C11"
 
-    # 2. Consulta con marca Ésika
+    # 2. Consulta con marca Ésika -> default C-15
     res_esika = await nodes.gather_context_and_trends_node({"raw_query": "¿Mis metas de Ésika?"})
     assert res_esika["supplier_id"] == 17
+    assert res_esika["campaign"] == "C-15"
+    assert res_esika["default_campaign"] == "C-15"
 
-    # 3. Consulta general
+    # 3. Consulta con campaña explícita C10
+    res_c10 = await nodes.gather_context_and_trends_node({"raw_query": "¿Qué premios hubo en la campaña 10 de Yanbal?"})
+    assert res_c10["supplier_id"] == 9
+    assert res_c10["campaign"] == "C10"
+    assert res_c10["default_campaign"] == "C11"
+
+    # 4. Consulta general
     res_general = await nodes.gather_context_and_trends_node({"raw_query": "¿Cómo van mis avances?"})
     assert "multibrand_gaps" in res_general
 

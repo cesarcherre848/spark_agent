@@ -53,13 +53,6 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"No fue posible pre-cargar el grafo al iniciar: {e}")
 
-    # Precargar modelo Laya para Guardrails (evita cold-start en el primer mensaje)
-    try:
-        from src.agent_service.core.guardrails.laya_client import get_laya_agent
-        logger.info("Precargando modelo Laya para Guardrails...")
-        get_laya_agent()
-    except Exception as e:
-        logger.warning(f"No fue posible precargar el modelo Laya al iniciar: {e}")
     yield
     logger.info("Cerrando recursos de Spark Agent...")
     try:
@@ -181,10 +174,6 @@ async def process_webhook(
             raw_final_response = messages[-1].content
 
     final_response = extract_clean_text(raw_final_response)
-    guardrail_warning = result.get("guardrail_warning")
-    if result.get("is_warning") and guardrail_warning and guardrail_warning not in final_response:
-        final_response = f"{guardrail_warning}\n\n{final_response}"
-
     intent = result.get("intent")
     is_topic_finished = bool(result.get("is_topic_finished", False))
 

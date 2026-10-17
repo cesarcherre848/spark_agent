@@ -123,6 +123,7 @@ class TestEvaluateLayaScores:
 # ==============================================================================
 # 2. PRUEBAS DEL EVALUADOR HÍBRIDO (evaluate_input_guardrail)
 # ==============================================================================
+@pytest.mark.skip(reason="Laya descontinuado en favor del evaluador LLM (tests/test_guardrails_llm.py)")
 class TestEvaluatorHybridIntegration:
     """Verifica la coordinación entre Capa 1 (Fast-Path) y Capa 2 (Laya)."""
 
@@ -225,6 +226,7 @@ class TestEvaluatorHybridIntegration:
 # ==============================================================================
 # 3. PRUEBAS DE INTEGRACIÓN CON LANGGRAPH (MAINGRAPH)
 # ==============================================================================
+@pytest.mark.skip(reason="Laya descontinuado en favor del evaluador LLM (tests/test_guardrails_llm.py)")
 class TestMainGraphLayaIntegration:
     """Verifica el comportamiento del Grafo Principal ante decisiones ALLOW, WARN y BLOCK de Laya."""
 
@@ -406,4 +408,50 @@ class TestMainGraphLayaIntegration:
         assert action == GuardrailAction.BLOCK
         assert category == ViolationCategory.HARMFUL_CONTENT
         assert refusal_msg is not None
+
+    def test_gemma_multiline_incentives_query_is_allowed(self, monkeypatch):
+        """Verifica que el caso real de Gemma (wa_51953320946) con saltos de línea y mención de nivel 2
+        sea permitido limpiamente gracias a la salvaguarda semántica."""
+        mock_laya_answers = {
+            "answers": {
+                "jailbreak": {"type": "noul", "noul": 1.0},
+                "sensitive_data": {"type": "noul", "noul": 0.14},
+                "application_related": {"type": "noul", "noul": 1.0},
+                "harm_severity": {"type": "score", "score": 1.0},
+            }
+        }
+        monkeypatch.setattr(
+            "src.agent_service.core.guardrails.evaluator.run_laya_evaluation",
+            lambda q, q_defs: mock_laya_answers,
+        )
+
+        query = "Hola\nMe\nMandas las mejores promociones para llegar al nivel 2 del ganamas del set de cuidado personal por favor"
+        res = evaluate_input_guardrail(query)
+
+        assert res.is_blocked is False
+        assert res.action == GuardrailAction.ALLOW
+        assert res.refusal_message is None
+
+    def test_novel_commercial_incentive_phrasing_semantic_allowed(self, monkeypatch):
+        """Verifica que consultas comerciales con términos novedosos de programas de incentivos
+        se permitan por afinidad semántica pura sin requerir listas estáticas de palabras."""
+        mock_laya_answers = {
+            "answers": {
+                "jailbreak": {"type": "noul", "noul": 0.05},
+                "sensitive_data": {"type": "noul", "noul": 0.02},
+                "application_related": {"type": "noul", "noul": 0.95},
+                "harm_severity": {"type": "score", "score": 0.25},
+            }
+        }
+        monkeypatch.setattr(
+            "src.agent_service.core.guardrails.evaluator.run_laya_evaluation",
+            lambda q, q_defs: mock_laya_answers,
+        )
+
+        query = "cuanto me falta para alcanzar la vara dorada del club elite este mes"
+        res = evaluate_input_guardrail(query)
+
+        assert res.is_blocked is False
+        assert res.action == GuardrailAction.ALLOW
+
 

@@ -26,6 +26,7 @@ SUPPLIER_ALIASES: Dict[int, Dict[str, Any]] = {
         "id": 9,
         "name": "Unique S.A.",
         "display_name": "Yanbal (Unique)",
+        "default_campaign": "C11",
         "aliases": [
             "unique", "yanbal", "yambal", "yanval", "yamval",
             "unique s.a.", "yanbal unique", "unike",
@@ -41,6 +42,7 @@ SUPPLIER_ALIASES: Dict[int, Dict[str, Any]] = {
         "id": 17,
         "name": "CETCO S.A.",
         "display_name": "Belcorp (Ésika / Cyzone / L'Bel)",
+        "default_campaign": "C-15",
         "aliases": [
             "cetco", "belcorp", "velcorp", "esika", "ésika", "esica", "ezika",
             "lbel", "l'bel", "cyzone", "saizone", "cetco s.a.",
@@ -51,6 +53,96 @@ SUPPLIER_ALIASES: Dict[int, Dict[str, Any]] = {
 }
 
 _SKU_SUPPLIER_CACHE: Dict[str, int] = {}
+
+
+def get_supplier_default_campaign(supplier_id: Optional[int]) -> Optional[str]:
+    """Obtiene la campaña comercial activa por defecto para un proveedor específico."""
+    if not supplier_id:
+        return None
+    supplier_info = SUPPLIER_ALIASES.get(int(supplier_id))
+    if supplier_info:
+        return supplier_info.get("default_campaign")
+    return None
+
+
+def detect_campaign_from_query(query: Optional[str]) -> Optional[str]:
+    """Detecta si la consulta del usuario menciona explícitamente una campaña o edición (ej: 'C11', 'C-15', 'campaña 10')."""
+    if not query or not isinstance(query, str):
+        return None
+    # 1. Patrón directo C-15, C11, C10
+    m_direct = re.search(r"\b(C-?\d{1,2})\b", query, re.IGNORECASE)
+    if m_direct:
+        raw = m_direct.group(1).upper()
+        if raw.startswith("C-"):
+            return raw
+        return f"C{raw[1:]}"
+    # 2. Patrón compuesto 'campaña 11', 'campaña 10'
+    m_word = re.search(r"\bcampaña\s*(\d{1,2})\b", query, re.IGNORECASE)
+    if m_word:
+        return f"C{m_word.group(1)}"
+    return None
+
+
+def normalize_incentive_metadata(record: Dict[str, Any]) -> Dict[str, Any]:
+    """Extrae y normaliza un diccionario estructurado de metadatos para un registro de incentivo."""
+    tags_raw = record.get("tags") or []
+    tag_names = []
+    for t in tags_raw:
+        if isinstance(t, dict) and "name" in t:
+            tag_names.append(t["name"])
+        elif isinstance(t, str):
+            tag_names.append(t)
+
+    campaign = None
+    pages = []
+    for tn in tag_names:
+        m_camp = re.match(r"^(C-?\d{1,2})$", tn, re.IGNORECASE)
+        if m_camp:
+            campaign = m_camp.group(1).upper()
+        m_pag = re.match(r"^Pág\s*(\d+)$", tn, re.IGNORECASE)
+        if m_pag:
+            pages.append(int(m_pag.group(1)))
+
+    title = record.get("title") or record.get("name") or ""
+    obs = record.get("observations") or ""
+    desc = record.get("description") or ""
+    full_text = f"{title} {desc} {obs}"
+
+    # Si no se encontró campaña en los tags, buscar en el texto
+    if not campaign:
+        m_camp_text = re.search(r"\b(C-?\d{1,2})\b|\bcampaña\s*(\d{1,2})\b", full_text, re.IGNORECASE)
+        if m_camp_text:
+            c_val = m_camp_text.group(1) or f"C{m_camp_text.group(2)}"
+            campaign = c_val.upper()
+
+    # Códigos de catálogo / SKUs
+    skus = list(dict.fromkeys(re.findall(r"Cód\.?\s*(?:Catálogo\s*(?:Yanbal\s*)?)?(\d+)", full_text)))
+
+    # Categoría
+    t_lower = title.lower()
+    cat = "general"
+    if "escala" in t_lower or "descuento" in t_lower:
+        cat = "discount_tier"
+    elif "vende y gana" in t_lower:
+        cat = "vende_y_gana"
+    elif "ganamás" in t_lower or "ganamas" in t_lower:
+        cat = "bonificacion_ganamas"
+    elif "capitalización" in t_lower or "capitalizacion" in t_lower:
+        cat = "capitalizacion"
+    elif "demostrador" in t_lower:
+        cat = "demostradores"
+
+    brand = "Yanbal" if record.get("supplier_id") == 9 or "Yanbal" in tag_names else "Belcorp"
+
+    return {
+        "campaign": campaign,
+        "brand": brand,
+        "pages": sorted(pages),
+        "category": cat,
+        "tag_names": tag_names,
+        "tag_ids": record.get("tag_ids") or [],
+        "skus": skus,
+    }
 
 
 def detect_target_supplier(query: Optional[str]) -> Optional[Dict[str, Any]]:
@@ -254,16 +346,31 @@ def resolve_supplier_sales_metrics(
 async def odoo_get_active_incentives(
     supplier_id: Optional[int] = None,
     supplier_name: Optional[str] = None,
+    campaign: Optional[str] = None,
+    tag: Optional[str] = None,
+    tag_ids: Optional[List[int]] = None,
+    metadata_filters: Optional[Dict[str, Any]] = None,
     validity_date: Optional[str] = None,
     only_active: bool = True,
+    use_supplier_default_campaign: bool = False,
     limit: int = 50,
     offset: int = 0,
     client: Optional[OdooClient] = None,
 ) -> List[Dict[str, Any]]:
-    """Consulta los planes de incentivo vigentes en Odoo ERP por proveedor."""
+    """Consulta los planes de incentivo vigentes en Odoo ERP por proveedor con soporte para
+    filtrado por metadata, etiquetas (tag, tag_ids) y campaña por defecto.
+    """
     c = get_shared_odoo_client(client)
     if not getattr(c, "_uid", None):
         await c.authenticate()
+
+    # Resolución de campaña por defecto si se solicita
+    resolved_campaign = campaign
+    if resolved_campaign is None and use_supplier_default_campaign and supplier_id is not None:
+        resolved_campaign = get_supplier_default_campaign(int(supplier_id))
+
+    # Determinar etiqueta de búsqueda para API REST
+    search_tag = tag or resolved_campaign
 
     params: Dict[str, Any] = {
         "limit": limit,
@@ -277,84 +384,143 @@ async def odoo_get_active_incentives(
         params["only_active"] = "true"
     if validity_date:
         params["validity_date"] = validity_date
+    if search_tag:
+        params["tag"] = search_tag
+    if tag_ids:
+        params["tag_ids"] = ",".join(str(i) for i in tag_ids) if isinstance(tag_ids, (list, tuple)) else str(tag_ids)
+
+    def _matches_metadata(record_meta: Dict[str, Any], filters: Dict[str, Any]) -> bool:
+        for k, v in filters.items():
+            if k == "category":
+                if str(v).lower() != str(record_meta.get("category", "")).lower():
+                    return False
+            elif k == "campaign":
+                if str(v).upper() != str(record_meta.get("campaign", "")).upper():
+                    return False
+            elif k in ("pages", "page"):
+                req_page = v if isinstance(v, (list, tuple, set)) else [v]
+                rec_pages = record_meta.get("pages", [])
+                if not any(int(p) in rec_pages for p in req_page):
+                    return False
+            elif k in ("skus", "sku"):
+                req_sku = v if isinstance(v, (list, tuple, set)) else [v]
+                rec_skus = record_meta.get("skus", [])
+                if not any(str(s) in rec_skus for s in req_sku):
+                    return False
+            elif k == "brand":
+                if str(v).lower() != str(record_meta.get("brand", "")).lower():
+                    return False
+            else:
+                if record_meta.get(k) != v:
+                    return False
+        return True
+
+    records: List[Dict[str, Any]] = []
+    rest_succeeded = False
 
     try:
         response = await c._client.get("/api/v1/sales_incentives", params=params)
         if response.status_code == 200:
             data = response.json()
+            raw_data = []
             if isinstance(data, dict) and "data" in data:
-                return data["data"]
+                raw_data = data["data"]
             elif isinstance(data, list):
-                return data
+                raw_data = data
+            for r in raw_data:
+                r["metadata"] = normalize_incentive_metadata(r)
+                records.append(r)
+            rest_succeeded = True
     except Exception as exc:
         logger.warning(f"Error consultando REST /api/v1/sales_incentives: {exc}. Intentando fallback JSON-RPC.")
 
-    # Fallback JSON-RPC call_kw sobre sale.incentive
-    domain: List[Any] = []
-    if only_active:
-        domain.append(["state", "=", "active"])
-        domain.append(["is_valid", "=", True])
-    if supplier_id is not None:
-        domain.append(["partner_id", "=", int(supplier_id)])
-    elif supplier_name and supplier_name.strip():
-        domain.append(["partner_id.name", "ilike", supplier_name.strip()])
+    if not rest_succeeded:
+        # Fallback JSON-RPC call_kw sobre sale.incentive
+        domain: List[Any] = []
+        if only_active:
+            domain.append(["state", "=", "active"])
+            domain.append(["is_valid", "=", True])
+        if supplier_id is not None:
+            domain.append(["partner_id", "=", int(supplier_id)])
+        elif supplier_name and supplier_name.strip():
+            domain.append(["partner_id.name", "ilike", supplier_name.strip()])
+        if tag_ids:
+            domain.append(["tag_ids", "in", tag_ids])
 
-    call_payload = {
-        "jsonrpc": "2.0",
-        "method": "call",
-        "params": {
-            "model": "sale.incentive",
-            "method": "search_read",
-            "args": [domain],
-            "kwargs": {
-                "fields": [
-                    "id",
-                    "name",
-                    "title",
-                    "partner_id",
-                    "date_start",
-                    "date_end",
-                    "state",
-                    "is_valid",
-                    "description",
-                    "observations",
-                ],
-                "limit": limit,
-                "offset": offset,
+        call_payload = {
+            "jsonrpc": "2.0",
+            "method": "call",
+            "params": {
+                "model": "sale.incentive",
+                "method": "search_read",
+                "args": [domain],
+                "kwargs": {
+                    "fields": [
+                        "id",
+                        "name",
+                        "title",
+                        "partner_id",
+                        "date_start",
+                        "date_end",
+                        "state",
+                        "is_valid",
+                        "description",
+                        "observations",
+                        "tag_ids",
+                    ],
+                    "limit": limit,
+                    "offset": offset,
+                },
             },
-        },
-        "id": 401,
-    }
+            "id": 401,
+        }
 
-    try:
-        res = await c._client.post("/web/dataset/call_kw", json=call_payload)
-        res.raise_for_status()
-        raw_records = res.json().get("result", []) or []
-        normalized = []
-        for r in raw_records:
-            partner = r.get("partner_id") or [None, "Sin proveedor"]
-            p_id = partner[0] if isinstance(partner, (list, tuple)) else partner
-            p_name = partner[1] if isinstance(partner, (list, tuple)) and len(partner) > 1 else str(partner)
-            normalized.append({
-                "id": r.get("id"),
-                "name": r.get("name"),
-                "title": r.get("title") or r.get("name"),
-                "supplier_id": p_id,
-                "supplier_name": p_name,
-                "partner_id": p_id,
-                "partner_name": p_name,
-                "description": r.get("description"),
-                "observations": r.get("observations"),
-                "benefit_plan": r.get("title") or r.get("name"),
-                "date_start": r.get("date_start"),
-                "date_end": r.get("date_end"),
-                "state": r.get("state"),
-                "is_valid": r.get("is_valid", True),
-            })
-        return normalized
-    except Exception as exc:
-        logger.error(f"Error en fallback JSON-RPC sobre sale.incentive: {exc}")
-        return []
+        try:
+            res = await c._client.post("/web/dataset/call_kw", json=call_payload)
+            res.raise_for_status()
+            raw_records = res.json().get("result", []) or []
+            for r in raw_records:
+                partner = r.get("partner_id") or [None, "Sin proveedor"]
+                p_id = partner[0] if isinstance(partner, (list, tuple)) else partner
+                p_name = partner[1] if isinstance(partner, (list, tuple)) and len(partner) > 1 else str(partner)
+                norm_item = {
+                    "id": r.get("id"),
+                    "name": r.get("name"),
+                    "title": r.get("title") or r.get("name"),
+                    "supplier_id": p_id,
+                    "supplier_name": p_name,
+                    "partner_id": p_id,
+                    "partner_name": p_name,
+                    "description": r.get("description"),
+                    "observations": r.get("observations"),
+                    "benefit_plan": r.get("title") or r.get("name"),
+                    "date_start": r.get("date_start"),
+                    "date_end": r.get("date_end"),
+                    "state": r.get("state"),
+                    "is_valid": r.get("is_valid", True),
+                    "tag_ids": r.get("tag_ids") or [],
+                    "tags": [{"id": tid, "name": f"Tag_{tid}"} for tid in (r.get("tag_ids") or [])],
+                }
+                norm_item["metadata"] = normalize_incentive_metadata(norm_item)
+                records.append(norm_item)
+        except Exception as exc:
+            logger.error(f"Error en fallback JSON-RPC sobre sale.incentive: {exc}")
+            records = []
+
+    # Filtrado por resolved_campaign si REST o JSON-RPC devolvieron registros sin filtrar
+    if resolved_campaign:
+        records = [
+            r for r in records
+            if (r.get("metadata", {}).get("campaign") or "").upper() == resolved_campaign.upper()
+            or resolved_campaign.upper() in [str(t.get("name", "")).upper() for t in r.get("tags", []) if isinstance(t, dict)]
+            or resolved_campaign.upper() in [str(t).upper() for t in r.get("tags", []) if isinstance(t, str)]
+        ]
+
+    # Filtrado por metadata_filters si se especificaron
+    if metadata_filters:
+        records = [r for r in records if _matches_metadata(r.get("metadata", {}), metadata_filters)]
+
+    return records
 
 
 def extract_sales_trends_from_lines(

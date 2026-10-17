@@ -223,7 +223,7 @@ LAYA_GUARD_QUESTIONS: Dict[str, Dict[str, Any]] = {
     },
     "application_related": {
         "type": "noul",
-        "instructions": "¿La consulta del usuario está relacionada con las funciones de esta aplicación (catálogo de productos, precios, cotizaciones, clientes, pedidos o compras)?",
+        "instructions": "¿La consulta del usuario está relacionada con el dominio comercial de venta por catálogo, belleza y cosmética (productos, precios, cotizaciones, clientes, pedidos, promociones, bonificaciones, metas o incentivos)?",
     },
     "harm_severity": {
         "type": "score",
@@ -292,7 +292,8 @@ def evaluate_laya_scores(
         return (GuardrailAction.BLOCK, cat, reason, None, format_guardrail_refusal(cat), scores_summary)
 
     # Bloqueo por extracción de datos sensibles / credenciales
-    if p_sensitive >= 0.85:
+    # Condición de flexibilidad: solo bloquea si la consulta no es comercial o presenta daño moderado/alto
+    if p_sensitive >= 0.85 and (p_out_of_scope > 0.35 or score_harm >= 1.5):
         cat = ViolationCategory.SYSTEM_LEAK
         reason = f"Intento de extracción de datos confidenciales o credenciales detectado por Laya (probabilidad: {p_sensitive:.2f})"
         return (GuardrailAction.BLOCK, cat, reason, None, format_guardrail_refusal(cat), scores_summary)

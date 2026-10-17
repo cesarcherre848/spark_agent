@@ -16,6 +16,9 @@ from src.agent_service.tools.incentive_tools import (
     resolve_supplier_sales_metrics,
     detect_target_supplier,
     get_active_incentive_targets,
+    get_supplier_default_campaign,
+    detect_campaign_from_query,
+    normalize_incentive_metadata,
 )
 
 
@@ -314,3 +317,99 @@ async def test_get_active_incentive_targets_integration(mock_odoo_client):
         assert "2210" in res["bonus_skus"]
         assert res["current_discount_tier"] == "25% de Descuento"
         assert res["gap_to_next_tier_pen"] == 320.0  # 720 - 400
+
+
+def test_detect_campaign_from_query():
+    """Valida la detección semántica de campaña en consultas de usuario."""
+    assert detect_campaign_from_query("¿Cuáles son los premios de la C11?") == "C11"
+    assert detect_campaign_from_query("Quiero revisar la campaña 11") == "C11"
+    assert detect_campaign_from_query("¿Hay beneficios en C-15?") == "C-15"
+    assert detect_campaign_from_query("Ver catálogo C10") == "C10"
+    assert detect_campaign_from_query("¿Cómo van mis ventas de Yanbal?") is None
+
+
+def test_get_supplier_default_campaign():
+    """Valida la obtención de la campaña por defecto por proveedor."""
+    assert get_supplier_default_campaign(9) == "C11"
+    assert get_supplier_default_campaign(17) == "C-15"
+    assert get_supplier_default_campaign(999) is None
+    assert get_supplier_default_campaign(None) is None
+
+
+def test_normalize_incentive_metadata():
+    """Valida la extracción y normalización de metadatos desde etiquetas y observaciones."""
+    sample_record = {
+        "id": 96,
+        "title": "Vende y Gana Perfumes: 1 Ohm Parfum 100 ml Gratis (Cód. Catálogo 200)",
+        "supplier_id": 9,
+        "description": "Producto Bonificado: 1 Ohm Parfum (Cód. 200) gratis por pedidos S/ 690+",
+        "observations": "Incluye Cód. 231, Cód. 2223, Cód. 200, Cód. 2041",
+        "tag_ids": [77, 80, 82, 126],
+        "tags": [
+            {"id": 77, "name": "Yanbal"},
+            {"id": 80, "name": "Pág 10"},
+            {"id": 82, "name": "Pág 12"},
+            {"id": 126, "name": "C11"},
+        ],
+    }
+    meta = normalize_incentive_metadata(sample_record)
+
+    assert meta["campaign"] == "C11"
+    assert meta["brand"] == "Yanbal"
+    assert meta["pages"] == [10, 12]
+    assert meta["category"] == "vende_y_gana"
+    assert "200" in meta["skus"]
+    assert "231" in meta["skus"]
+    assert "2223" in meta["skus"]
+    assert "2041" in meta["skus"]
+
+
+@pytest.mark.asyncio
+async def test_odoo_get_active_incentives_with_campaign_and_metadata_filter(mock_odoo_client):
+    """Valida la consulta con filtro de campaña y post-filtrado por metadata."""
+    mock_resp = MagicMock(spec=Response)
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "status": "success",
+        "count": 2,
+        "total": 2,
+        "data": [
+            {
+                "id": 84,
+                "title": "Escala Comercial 25%",
+                "supplier_id": 9,
+                "tags": [{"id": 126, "name": "C11"}, {"id": 82, "name": "Pág 12"}],
+                "tag_ids": [126, 82],
+                "observations": "Descuento en factura",
+                "description": "25% de descuento",
+            },
+            {
+                "id": 96,
+                "title": "Vende y Gana Perfumes (Cód. 200)",
+                "supplier_id": 9,
+                "tags": [{"id": 126, "name": "C11"}, {"id": 80, "name": "Pág 10"}, {"id": 82, "name": "Pág 12"}],
+                "tag_ids": [126, 80, 82],
+                "observations": "Cód. 200 gratis",
+                "description": "Perfume gratis",
+            },
+        ],
+    }
+    mock_odoo_client._client.get.return_value = mock_resp
+
+    # Consulta filtrando por category="vende_y_gana"
+    res = await odoo_get_active_incentives(
+        supplier_id=9,
+        campaign="C11",
+        metadata_filters={"category": "vende_y_gana"},
+        client=mock_odoo_client,
+    )
+
+    assert len(res) == 1
+    assert res[0]["id"] == 96
+    assert res[0]["metadata"]["category"] == "vende_y_gana"
+    assert res[0]["metadata"]["campaign"] == "C11"
+    mock_odoo_client._client.get.assert_awaited_once_with(
+        "/api/v1/sales_incentives",
+        params={"limit": 50, "offset": 0, "supplier_id": 9, "only_active": "true", "tag": "C11"},
+    )
+

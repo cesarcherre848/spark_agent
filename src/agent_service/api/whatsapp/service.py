@@ -4,8 +4,9 @@ src/agent_service/api/whatsapp/service.py - Orquestador de Mensajería para What
 
 import asyncio
 import logging
+from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any, List
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, RemoveMessage
 
 from src.agent_service.api.service import PhoneUserResolver, get_phone_user_resolver, normalize_phone
 from src.agent_service.api.whatsapp.client import WhatsAppClient, get_whatsapp_client
@@ -298,13 +299,58 @@ class WhatsAppService:
         config = {"configurable": {"thread_id": session_id}}
 
         try:
-            # Comprobar si el hilo tiene un interrupt (HITL) pendiente de confirmación
+            # Comprobar si el hilo tiene un interrupt (HITL) pendiente o si expiró la sesión (> 24h)
             from langgraph.types import Command
             has_pending_interrupt = False
             if hasattr(graph, "aget_state"):
                 state_call = graph.aget_state(config)
                 if hasattr(state_call, "__await__"):
                     thread_state = await state_call
+                    if thread_state and getattr(thread_state, "values", None):
+                        ttl_seconds = self._settings.session_ttl_seconds
+                        created_at_val = getattr(thread_state, "created_at", None)
+                        if created_at_val and ttl_seconds > 0:
+                            try:
+                                if isinstance(created_at_val, str):
+                                    created_dt = datetime.fromisoformat(created_at_val)
+                                else:
+                                    created_dt = created_at_val
+                                if datetime.now(timezone.utc) - created_dt > timedelta(seconds=ttl_seconds):
+                                    logger.info(
+                                        f"[WhatsAppService] Sesión {session_id} inactiva por más de {ttl_seconds}s "
+                                        f"({created_at_val}). Purgando memoria de corto plazo de la sesión anterior."
+                                    )
+                                    old_msgs = thread_state.values.get("messages", [])
+                                    remove_ops = [RemoveMessage(id=m.id) for m in old_msgs if getattr(m, "id", None)]
+                                    if hasattr(graph, "aupdate_state"):
+                                        reset_values = {
+                                            "active_customer": None,
+                                            "active_partner_id": None,
+                                            "active_order": None,
+                                            "active_order_id": None,
+                                            "customer_name": None,
+                                            "target_customer_name": None,
+                                            "target_order_name": None,
+                                            "user_context": None,
+                                            "retrieved_memories": [],
+                                        }
+                                        if remove_ops:
+                                            reset_values["messages"] = remove_ops
+                                        await graph.aupdate_state(config, reset_values)
+                                    thread_state = None
+                            except Exception as e:
+                                logger.warning(f"[WhatsAppService] Error validando TTL de sesión: {e}")
+
+                        # Poda de mensajes excedentes (> 15) para mantener la memoria ágil y evitar arrastre histórico
+                        if thread_state and getattr(thread_state, "values", None) and thread_state.values.get("messages"):
+                            old_msgs = thread_state.values["messages"]
+                            if len(old_msgs) > 15:
+                                excess_msgs = old_msgs[:-15]
+                                remove_excess = [RemoveMessage(id=m.id) for m in excess_msgs if getattr(m, "id", None)]
+                                if remove_excess and hasattr(graph, "aupdate_state"):
+                                    logger.info(f"[WhatsAppService] Purgando {len(remove_excess)} mensajes excedentes (>15) en {session_id}.")
+                                    await graph.aupdate_state(config, {"messages": remove_excess})
+
                     has_pending_interrupt = bool(
                         thread_state and getattr(thread_state, "tasks", None) and any(t.interrupts for t in thread_state.tasks)
                     )
@@ -352,6 +398,11 @@ class WhatsAppService:
             logger.info(f"[WhatsAppService] Capturado interrupt HITL conversacional para WhatsApp: '{raw_response}'")
         else:
             raw_response = final_state.get("final_response") or ""
+            if not raw_response:
+                for m in reversed(final_state.get("messages", [])):
+                    if isinstance(m, AIMessage) and m.content:
+                        raw_response = m.content
+                        break
 
         clean_response = self._responder.format_response(raw_response)
         if not clean_response:

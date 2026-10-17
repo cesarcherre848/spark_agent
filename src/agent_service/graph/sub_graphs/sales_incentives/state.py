@@ -20,6 +20,9 @@ class SalesIncentivesState(TypedDict, total=False):
     is_multibrand: Optional[bool]
     channel: Optional[str]
     user_context: Optional[str]
+    campaign: Optional[str]
+    default_campaign: Optional[str]
+    metadata_filters: Optional[Dict[str, Any]]
 
     # Datos recopilados de Odoo ERP
     orders_data: Optional[Dict[str, Any]]

@@ -55,6 +55,14 @@ class CustomerIntentSpec(BaseModel):
         default=None,
         description="Tipo de piel (ej: 'mixta', 'grasa', 'seca', 'sensible').",
     )
+    functional_category: Optional[Literal["skincare_treatment", "makeup_cosmetics", "fragrance_perfumery", "personal_hygiene", "haircare", "accessories"]] = Field(
+        default=None,
+        description="Familia funcional primaria inferida de la intención de uso: 'skincare_treatment' (cuidado/tratamiento/limpieza facial/solar), 'makeup_cosmetics' (bases/polvos/labiales/sombras), 'fragrance_perfumery' (perfumes/colonias/brumas), 'personal_hygiene' (desodorantes/jabones), 'haircare' (cabello).",
+    )
+    target_stage: Optional[Literal["adult", "teen_young", "kids", "baby"]] = Field(
+        default="adult",
+        description="Etapa etaria del destinatario: 'adult', 'teen_young', 'kids', 'baby'. Por defecto 'adult' si no se menciona infantil/bebé.",
+    )
     excluded_targets: List[str] = Field(
         default_factory=list,
         description="Perfiles incompatibles a excluir (ej: ['juvenil_teen', 'masculino', 'corporal']).",
