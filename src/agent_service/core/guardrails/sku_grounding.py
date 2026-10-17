@@ -46,6 +46,8 @@ class SKUExtractor:
         re.compile(r"\b(?:\+?51)?9\d{8}\b"),                       # Números telefónicos
         re.compile(r"\bPág\.?\s*\d+\b", re.IGNORECASE),            # Menciones de página
         re.compile(r"\b(?:C-?\d{1,2}|Campaña\s*\d{1,2})\b", re.IGNORECASE),  # Campaña C10
+        re.compile(r"\b(?:N[°ºo.]?|Nro\.?)\s*\d+\b", re.IGNORECASE),        # Numeración de brochas/tonos: N° 101, N° 201
+        re.compile(r"\b\d+\s*%\b"),                                         # Porcentajes: 100%, 50%
     ]
 
     @classmethod
@@ -67,7 +69,7 @@ class SKUExtractor:
             for m in matches:
                 clean_m = str(m).strip()
                 # Filtrar códigos demasiado cortos o palabras comunes
-                if len(clean_m) >= 2 and not clean_m.lower() in {"sku", "ref", "pag", "c10", "c15"}:
+                if len(clean_m) >= 2 and not clean_m.lower() in {"sku", "ref", "pag", "c10", "c11", "c12", "c15"}:
                     found_candidates.add(clean_m)
 
         # 3. También buscar patrones tipo [150] en el texto original (si no es precio)
@@ -91,7 +93,8 @@ class SKUGroundingValidator:
     def build_authorized_sku_index(
         cls, candidate_products: List[Dict[str, Any]]
     ) -> Dict[str, Dict[str, Any]]:
-        """Construye un índice de SKUs autorizados a partir de los productos candidatos del turno."""
+        """Construye un índice de SKUs autorizados a partir de los productos candidatos del turno,
+        incluyendo las variantes/tonos oficiales de la página del catálogo (catalog_variants)."""
         index: Dict[str, Dict[str, Any]] = {}
         for p in candidate_products:
             if isinstance(p, dict):
@@ -102,6 +105,12 @@ class SKUGroundingValidator:
                 d_code = str(p.get("default_code") or "").strip()
                 if d_code:
                     index[d_code] = p
+                # Indexar todas las variantes/tonos de la página del catálogo
+                for cv in p.get("catalog_variants") or []:
+                    if isinstance(cv, dict) and cv.get("sku"):
+                        cv_sku = str(cv["sku"]).strip()
+                        if cv_sku and cv_sku not in index:
+                            index[cv_sku] = p
         return index
 
     @classmethod

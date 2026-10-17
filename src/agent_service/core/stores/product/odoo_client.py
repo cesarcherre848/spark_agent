@@ -200,10 +200,97 @@ class OdooClient:
                 )
             )
 
-        # Detectar SKUs no encontrados
+        # Detectar SKUs no encontrados en product.product y consultar la verdad del catálogo (product_catalog_embedding)
         not_found_skus = [s for s in clean_skus if s not in found_skus]
+        if not_found_skus:
+            try:
+                from src.agent_service.core.stores.product.catalog_reconciler import get_catalog_truth_reconciler
+                reconciler = get_catalog_truth_reconciler()
+                idx = await reconciler.get_catalog_index()
+                sku_to_var = idx.get("sku_to_variant", {})
+                sku_to_page = idx.get("sku_to_page", {})
+                remaining_not_found: List[str] = []
+                for missing_s in not_found_skus:
+                    if missing_s in sku_to_var and missing_s in sku_to_page:
+                        var = sku_to_var[missing_s]
+                        page = sku_to_page[missing_s]
+                        inferred_title = reconciler._infer_product_title_from_page(page, var)
+                        cat_desc = f"[Catálogo {page.edicion} Pág. {page.page_number}]: {' '.join(page.clean_text.split())[:380]}"
+                        products.append(
+                            ProductOdooDetail(
+                                product_id=int(missing_s) if missing_s.isdigit() else 0,
+                                sku=missing_s,
+                                name=inferred_title,
+                                price=float(var.offer_price or var.normal_price or 0.0) if "price" in requested_attrs else None,
+                                currency="PEN" if "price" in requested_attrs else None,
+                                uom="Unidades" if "uom" in requested_attrs else None,
+                                sales_description=cat_desc if "description" in requested_attrs else None,
+                                category=page.marca if "category" in requested_attrs else None,
+                                barcode=None,
+                                taxes=None,
+                            )
+                        )
+                    else:
+                        remaining_not_found.append(missing_s)
+                not_found_skus = remaining_not_found
+            except Exception as e:
+                logger.debug(f"OdooClient: Fallback a CatalogTruthReconciler no disponible: {e}")
+
+        # También enriquecer o corregir precio de oferta para los SKUs que sí están en product.product pero tienen oferta vigente en catálogo
+        try:
+            from src.agent_service.core.stores.product.catalog_reconciler import get_catalog_truth_reconciler
+            reconciler = get_catalog_truth_reconciler()
+            idx = await reconciler.get_catalog_index()
+            sku_to_var = idx.get("sku_to_variant", {})
+            if "price" in requested_attrs and sku_to_var:
+                for prod in products:
+                    var = sku_to_var.get(str(prod.sku))
+                    if var and var.offer_price is not None:
+                        prod.price = float(var.offer_price)
+        except Exception:
+            pass
 
         return GetProductBySkusOutput(products=products, not_found_skus=not_found_skus)
+
+    async def search_product_catalog_embeddings(
+        self,
+        query: str,
+        limit: int = 16,
+        catalog_id: Optional[int] = None,
+        partner_id: Optional[int] = None,
+        chunk_types: Optional[List[str]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Ejecuta búsqueda multimodal semántica 768d (google/embeddinggemma-2) en product_catalog_embedding
+        a través del endpoint nativo /api/v1/product_catalog/search de Odoo."""
+        clean_query = " ".join((query or "").split()).strip()
+        if not clean_query:
+            return []
+
+        payload: Dict[str, Any] = {
+            "query": clean_query,
+            "limit": limit,
+            "chunk_types": chunk_types or ["text", "image"],
+        }
+        if catalog_id is not None:
+            payload["catalog_id"] = int(catalog_id)
+        if partner_id is not None:
+            payload["partner_id"] = int(partner_id)
+
+        headers = {"X-Odoo-Database": self._db}
+        try:
+            response = await self._client.post(
+                "/api/v1/product_catalog/search",
+                json=payload,
+                headers=headers,
+            )
+            response.raise_for_status()
+            data = response.json()
+            if isinstance(data, dict):
+                return data.get("data") or data.get("results") or []
+            return []
+        except Exception as e:
+            logger.warning(f"OdooClient: Fallo en /api/v1/product_catalog/search para '{clean_query}': {e}")
+            return []
 
     async def search_suppliers(
         self,
@@ -278,4 +365,5 @@ class OdooClient:
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.aclose()
+
 

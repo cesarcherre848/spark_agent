@@ -125,6 +125,9 @@ class BaseSynthesizerNode:
                 edicion = meta.get("edicion")
                 pagina = meta.get("pagina")
                 price = meta.get("price")
+                normal_price = meta.get("normal_price")
+                discount_tag = meta.get("discount_tag")
+                catalog_variants = meta.get("catalog_variants")
                 currency = meta.get("currency") or "PEN"
             elif isinstance(item, dict):
                 desc = (item.get("description") or item.get("page_content") or "")[:max_desc_len].strip()
@@ -135,6 +138,9 @@ class BaseSynthesizerNode:
                 edicion = item.get("edicion")
                 pagina = item.get("pagina")
                 price = item.get("price")
+                normal_price = item.get("normal_price")
+                discount_tag = item.get("discount_tag")
+                catalog_variants = item.get("catalog_variants")
                 currency = item.get("currency") or "PEN"
             else:
                 continue
@@ -152,13 +158,28 @@ class BaseSynthesizerNode:
                 meta_details.append(f"Página de catálogo: {pagina}")
             if price is not None:
                 price_str = cls.format_currency(price, currency=currency)
-                meta_details.append(f"Precio: {price_str}")
+                meta_details.append(f"Precio Oferta: {price_str}")
+            if normal_price is not None and price is not None and float(normal_price) > float(price):
+                norm_str = cls.format_currency(normal_price, currency=currency)
+                meta_details.append(f"Precio Normal: {norm_str}")
+            if discount_tag:
+                meta_details.append(f"Promoción: {discount_tag}")
 
             meta_str = " | ".join(meta_details)
+            variants_str = ""
+            if catalog_variants and isinstance(catalog_variants, list) and len(catalog_variants) > 1:
+                v_items = []
+                for cv in catalog_variants[:12]:
+                    if isinstance(cv, dict) and cv.get("sku"):
+                        v_lbl = cv.get("label") or "Variante"
+                        v_items.append(f"{v_lbl} -> SKU OFICIAL: {cv['sku']}")
+                if v_items:
+                    variants_str = f"\n  • TONOS / VARIANTES EN ESTA PÁGINA: {'; '.join(v_items)}"
+
             formatted_lines.append(
                 f"PRODUCTO: {name}\n"
                 f"  • {sku_str} | {meta_str}\n"
-                f"  • Detalle: {desc}"
+                f"  • Detalle: {desc}{variants_str}"
             )
 
         return "\n\n".join(formatted_lines)

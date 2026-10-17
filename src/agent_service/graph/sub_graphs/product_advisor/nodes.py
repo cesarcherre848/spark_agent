@@ -156,12 +156,22 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
               debes PRESERVARLO Y PROPAGARLO OBLIGATORIAMENTE a cualquier consulta de seguimiento elíptica.
             - EXTRACCIÓN ESTRUCTURADA DE PERFIL DE INTENCIÓN (intent_spec):
               DEBES poblar el campo 'intent_spec' en tu plan con los datos inferidos de la consulta e historial:
+              * functional_category: Familia funcional primaria:
+                - 'skincare_treatment': Cuidado, tratamiento, hidratación, sueros, limpieza y protectores solares.
+                - 'makeup_cosmetics': Bases, polvos, labiales, sombras, delineadores, correctores.
+                - 'fragrance_perfumery': Perfumes, colonias, eau de parfum, eau de toilette, brumas aromáticas.
+                - 'personal_hygiene': Desodorantes, roll-on, antitranspirantes, jabones de tocador.
+              * target_stage: 'adult', 'mature', 'teen_young', o 'kids'. Por defecto 'adult' a menos que se pida expresamente para bebés/niños.
               * target_gender: 'female', 'male', 'unisex', o 'kids'.
               * target_age: Edad numérica si se menciona o puede estimarse del texto (ej: 50, 32, 18, etc.).
               * target_age_group: Etapa de vida inferida de la edad ('kids', 'teen_young', 'adult', 'mature'). Si edad >= 45 o 'madura', fija 'mature'.
               * anatomical_focus: 'facial', 'body', 'hair', 'fragrance', o 'makeup'.
               * product_profile: 'fresca_diario', 'citrica', 'antiarrugas', etc.
               * excluded_targets: Si la persona es adulta o madura (edad >= 45), incluye ['juvenil_teen', 'kids'] para descartar fragancias de fantasía adolescente o infantil.
+            - DISCRIMINACIÓN TAXONÓMICA Y FAMILIA FUNCIONAL:
+              * Skincare vs Maquillaje: Si el diálogo trata sobre cuidado facial, tratamiento o limpieza de rostro, fija functional_category='skincare_treatment'. NUNCA recomiendes bases de maquillaje, polvos ni correctores para solicitudes de cuidado/tratamiento de piel a menos que el usuario pida maquillaje explícitamente.
+              * Fragancias vs Higiene: Si el diálogo trata sobre fragancias o perfumes y el cliente pide 'algo menos' o 'más barato', DEBES PRESERVAR la categoría functional_category='fragrance_perfumery' buscando colonias o sprays más accesibles. NUNCA sustituyas una fragancia por desodorantes ni jabones a menos que el cliente los pida directamente.
+              * Cuidado facial adulto: NUNCA recomiendes cremas o productos infantiles (ej: Yanbal Baby) para solicitudes de cuidado facial de adultos.
             - DISCRIMINACIÓN ANATÓMICA ESTRICTA:
               Si el diálogo trata sobre 'rostro', 'crema facial', 'antiarrugas', 'cutis', NUNCA mezcles cremas corporales, de manos o capilares.
             - REGLA DE DESCONOCIMIENTO DE IDS INTERNOS: Los usuarios de negocio NO conocen ni utilizan IDs internos de base de datos (`product_id`, `partner_id`). Todo número o código de producto indicado por el cliente es SIEMPRE un SKU comercial (ej: 20013876, 47000).
@@ -458,7 +468,7 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
                                 if s:
                                     existing_skus.add(s)
 
-            elif t_name in ("filter_and_sort_products", "rerank_and_filter_candidates"):
+            elif t_name == "filter_and_sort_products":
                 if isinstance(res, list):
                     if not res and candidate_products:
                         logger.info(
@@ -475,6 +485,10 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
                     else:
                         candidate_products = res
 
+            elif t_name == "rerank_and_filter_candidates":
+                if isinstance(res, list):
+                    candidate_products = res
+
             elif t_name == "get_customer_purchase_history":
                 if isinstance(res, dict):
                     purchase_history = res
@@ -490,7 +504,10 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
                             existing_skus.add(s)
                         if s and s in details_by_sku:
                             det = details_by_sku[s]
-                            p["price"] = det.get("price")
+                            if p.get("catalog_offer_price") is not None:
+                                p["price"] = float(p["catalog_offer_price"])
+                            elif det.get("price") is not None:
+                                p["price"] = det.get("price")
                             p["currency"] = det.get("currency")
                             p["uom"] = det.get("uom")
                             if det.get("sales_description"):
@@ -537,7 +554,10 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
                         for p in candidate_products:
                             s = p.get("sku")
                             if s in details_by_sku:
-                                p["price"] = details_by_sku[s].get("price")
+                                if p.get("catalog_offer_price") is not None:
+                                    p["price"] = float(p["catalog_offer_price"])
+                                else:
+                                    p["price"] = details_by_sku[s].get("price")
                                 p["currency"] = details_by_sku[s].get("currency")
                                 p["uom"] = details_by_sku[s].get("uom")
             except Exception as e:
@@ -628,6 +648,12 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
                - Si el cliente busca opciones para chicos jóvenes o adolescentes, favorece entonces líneas frescas juveniles, chispeantes y frutales.
             10. OPORTUNIDAD COMERCIAL POR VARIACIÓN DE PRECIO INTER-CATÁLOGO:
                - Si en los datos del producto se indica una variación de precio favorable respecto a la campaña anterior (ej: price_variation con descuento o menor precio en la campaña actual), menciónalo de manera consultiva y atractiva para el cliente como una oportunidad especial o rebaja destacada (ej: 'con S/. XX.XX de descuento respecto a la campaña previa').
+            11. INTEGRIDAD DE FAMILIA FUNCIONAL (CUIDADO FACIAL / TRATAMIENTO VS MAQUILLAJE):
+               - Si el cliente consulta por cuidado facial, hidratación, limpieza o tratamiento de la piel (incluyendo piel mixta, grasa o seca), NUNCA recomiendes bases líquidas, polvos compactos ni correctores de maquillaje, aun si contienen ingredientes matificantes o niacinamida. Ofrece exclusivamente cremas hidratantes, geles, sueros o limpiadores faciales de tratamiento.
+            12. INTEGRIDAD DE CATEGORÍA DE PERFUMERÍA VS HIGIENE PERSONAL:
+               - Si el cliente busca fragancias, perfumes o colonias y pide 'algo más barato' o 'algo menos', NUNCA sustituyas con desodorantes en roll-on ni jabones haciéndolos pasar por fragancias. Si la fragancia más accesible cuesta más que lo esperado, explica de forma consultiva que es la opción de perfumería más económica disponible del catálogo.
+            13. ADULTO VS LÍNEAS PEDIÁTRICAS O BEBÉ:
+               - Para consultas de cuidado facial o corporal de adultos, jamás recomiendes productos pediátricos o para bebés (ej: Yanbal Baby) a menos que se solicite expresamente para recién nacidos o infantes.
         """
 
         critique = state.get("critique")
@@ -717,7 +743,14 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
         max_iterations = state.get("max_iterations", self._default_max_iterations)
         metadata_filters = state.get("metadata_filters") or {}
 
-        products_context = self.format_products_context(candidate_products)
+        user_id = state.get("user_id")
+        try:
+            hierarchical_families = await self._hierarchy_resolver.group_candidates_hierarchically(
+                candidate_products, user_id=user_id
+            )
+            products_context = self.format_products_context(hierarchical_families or candidate_products)
+        except Exception:
+            products_context = self.format_products_context(candidate_products)
 
         # Extraer historial previo para evaluación justa de continuidad
         all_messages = state.get("messages", [])
@@ -743,6 +776,7 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
             3. constraints_score: ¿Se respetaron los filtros y restricciones del diálogo (marcas solicitadas, números de página, campañas, límites de presupuesto, género Y ADECUACIÓN DEMOGRÁFICA / GRUPO ETARIO)?
                - GÉNERO / PÚBLICO: Si el diálogo solicita público objetivo / género hombre/mujer/niños (ej: masculinos/hombre) y se recomiendan artículos femeninos o infantiles (o viceversa), califica constraints_score con < 5.0 y desaprueba (is_approved = False).
                - ADECUACIÓN DEMOGRÁFICA / EDAD: Si el diálogo solicita productos para una clienta o cliente adulto/maduro (ej: 50 años) y se recomiendan colonias o productos de concepto adolescente/juvenil (fantasía teen, glitter o notas golosina) o infantiles (o viceversa), califica constraints_score con < 5.0, desaprueba (is_approved = False) y selecciona 're_rerank_with_feedback' exigiendo líneas acordes al perfil etario maduro (perfil sobrio, floral clásico o distinguido).
+               - INTEGRIDAD DE FAMILIA FUNCIONAL: Si el diálogo solicita cuidado facial / tratamiento y se recomiendan productos de maquillaje (bases, polvos, correctores), o si solicita fragancias/perfumes y se recomiendan desodorantes o jabones sustituyendo la perfumería, o si es para adulto y se recomiendan productos de bebé/pediátricos: califica constraints_score con < 5.0, desaprueba (is_approved = False) y selecciona 're_rerank_with_feedback' o 'replan_tools'.
             4. presentation_score: ¿Cumple con el estándar del sintetizador padre (agrupación limpia por marcas cuando hay 2 o más marcas distintas, formato de viñetas con [SKU] Nombre, precio en S/., tono consultivo sin jerga técnica y sin saludos redundantes si hay turnos previos)? OBLIGATORIO: Si el texto contiene viñetas de productos pegadas o concatenadas en el mismo párrafo sin saltos de línea (\\n), califica presentation_score < 6.0, marca is_approved = False.
             5. clarity_and_unambiguity_score: ¿La respuesta es 100% clara, directa e inequívoca? En preguntas de seguimiento o referencia de turnos previos ('esto a qué catálogo pertenece', '¿cuánto cuesta ese?', '¿de qué marca son?'):
                - Debe identificar con exactitud de qué productos se habla y atribuir con veracidad quirúrgica su marca y catálogo/campaña real.
@@ -784,10 +818,18 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
             HumanMessage(content=user_content),
         ]
 
+        # Expandir candidatos con sus variantes de catálogo para que SKUGroundingValidator reconozca todos los tonos/iniciales oficiales de la página
+        expanded_candidates = list(candidate_products)
+        for cp in candidate_products:
+            if isinstance(cp, dict) and cp.get("catalog_variants"):
+                for cv in cp["catalog_variants"]:
+                    if isinstance(cv, dict) and cv.get("sku"):
+                        expanded_candidates.append({"sku": cv["sku"], "name": cv.get("label") or cp.get("name")})
+
         # 1. Auditoría Determinista Anti-Alucinación de SKUs (Capa 2)
         grounding_check = SKUGroundingValidator.validate_draft_grounding(
             draft_response=draft_response,
-            candidate_products=candidate_products,
+            candidate_products=expanded_candidates,
         )
         if not grounding_check.is_valid and iteration_count < max_iterations:
             logger.warning(f"[RubricJudge] Grounding determinista rechazó borrador: {grounding_check.invalid_skus}")
@@ -860,12 +902,17 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
         iteration_count = state.get("iteration_count", 0)
         meets_rubric = state.get("meets_rubric", False)
 
-        # Sanitización fail-safe final de SKUs (Capa 4)
+        # Sanitización fail-safe final de SKUs (Capa 4), incluyendo variantes de catálogo en la página
         authorized_skus = {
             str(p.get("sku") or p.get("default_code") or "").strip()
             for p in candidate_products
             if isinstance(p, dict) and (p.get("sku") or p.get("default_code"))
         }
+        for p in candidate_products:
+            if isinstance(p, dict) and p.get("catalog_variants"):
+                for cv in p["catalog_variants"]:
+                    if isinstance(cv, dict) and cv.get("sku"):
+                        authorized_skus.add(str(cv["sku"]).strip())
         authorized_skus.discard("")
         if authorized_skus:
             draft_response = SKUFailSafeSanitizer.sanitize_text(draft_response, authorized_skus)
@@ -885,3 +932,4 @@ class ProductAdvisorNodes(BaseSynthesizerNode):
                 "reflection_action": "approve",
             },
         )
+

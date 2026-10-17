@@ -144,10 +144,35 @@ def create_validate_product_ownership_tool(pool: Optional[AsyncConnectionPool] =
         for r in rows:
             sku_to_rows[str(r[0])].append(r)
 
+        catalog_sku_to_var = {}
+        try:
+            from src.agent_service.core.stores.product.catalog_reconciler import get_catalog_truth_reconciler
+            reconciler = get_catalog_truth_reconciler(pool=db_pool)
+            idx = await reconciler.get_catalog_index()
+            catalog_sku_to_var = idx.get("sku_to_variant", {})
+        except Exception:
+            catalog_sku_to_var = {}
+
         results: Dict[str, SkuOwnershipResult] = {}
         for s in clean_skus:
             matched_rows = sku_to_rows.get(s, [])
-            if not matched_rows:
+            if not matched_rows and s in catalog_sku_to_var:
+                var = catalog_sku_to_var[s]
+                results[s] = SkuOwnershipResult(
+                    sku=s,
+                    product_id=int(s) if s.isdigit() else 0,
+                    is_owner=True,
+                    candidate_partners=[
+                        ProductPartnerInfo(
+                            partner_id=str(var.vendor_id),
+                            vendor_id=int(var.vendor_id),
+                            vendor_name=str(var.vendor_name),
+                        )
+                    ],
+                    has_conflict=False,
+                    conflict_reason=None,
+                )
+            elif not matched_rows:
                 results[s] = SkuOwnershipResult(
                     sku=s,
                     product_id=None,
@@ -255,8 +280,18 @@ def create_search_product_catalog_tool(vector_store: Optional[ProductVectorStore
             results.append({
                 "product_id": meta.get("product_id"),
                 "sku": meta.get("sku"),
+                "healed_from_sku": meta.get("healed_from_sku"),
+                "healing_reason": meta.get("healing_reason"),
                 "name": p_name,
                 "description": doc.page_content,
+                "price": meta.get("price"),
+                "catalog_offer_price": meta.get("catalog_offer_price"),
+                "normal_price": meta.get("normal_price"),
+                "discount_tag": meta.get("discount_tag"),
+                "catalog_verified": bool(meta.get("catalog_verified")),
+                "multimodal_hit": bool(meta.get("multimodal_hit")),
+                "catalog_variants": meta.get("catalog_variants"),
+                "page_image_url": meta.get("page_image_url"),
                 "pagina": meta.get("pagina"),
                 "edicion": p_edicion,
                 "marca": meta.get("marca"),
@@ -328,8 +363,17 @@ def create_get_cross_sell_recommendations_tool(
             results.append({
                 "product_id": meta.get("product_id"),
                 "sku": sku,
+                "healed_from_sku": meta.get("healed_from_sku"),
+                "healing_reason": meta.get("healing_reason"),
                 "name": meta.get("name") or "Producto sin nombre",
                 "description": doc.page_content,
+                "price": meta.get("price"),
+                "catalog_offer_price": meta.get("catalog_offer_price"),
+                "normal_price": meta.get("normal_price"),
+                "discount_tag": meta.get("discount_tag"),
+                "catalog_verified": bool(meta.get("catalog_verified")),
+                "multimodal_hit": bool(meta.get("multimodal_hit")),
+                "catalog_variants": meta.get("catalog_variants"),
                 "pagina": meta.get("pagina"),
                 "edicion": meta.get("edicion"),
                 "marca": meta.get("marca"),
@@ -488,13 +532,33 @@ def create_rerank_and_filter_candidates_tool():
         is_adult = is_mature or (target_age_group == "adult") or (target_age is not None and target_age >= 25)
         is_teen = (target_age_group == "teen_young") or (target_age is not None and 13 <= target_age < 25)
 
+        raw_func_cat = str(spec.get("functional_category") or "").lower()
+        target_stage = str(spec.get("target_stage") or "").lower()
+        if not is_adult and not is_mature and not is_teen:
+            # Por defecto, si no se solicitó explícitamente infantil/bebé, asumir destinatario adulto
+            if target_stage not in ["kids", "baby"] and not any(w in ctx_str for w in ["bebe", "bebé", "baby", "infantil", "niño", "niña"]):
+                is_adult = True
+
         anatomical_focus = spec.get("anatomical_focus")
         is_facial_focus = (anatomical_focus in ["facial", "face", "rostro"]) or any(
-            w in ctx_str for w in ["rostro", "facial", "cutis", "cara", "antiarrugas", "ojos"]
+            w in ctx_str for w in ["rostro", "facial", "cutis", "cara", "antiarrugas", "ojos", "piel mixta", "piel grasa", "piel seca", "piel normal"]
         )
         is_fragrance_focus = (anatomical_focus in ["fragrance", "fragancia", "perfume", "colonia"]) or any(
             w in ctx_str for w in ["colonia", "perfume", "fragancia", "eau de", "aroma"]
         )
+
+        has_explicit_makeup_in_query = any(
+            w in ctx_str for w in ["maquillaje", "base", "polvo", "labial", "sombras", "rimel", "rímel", "corrector", "rubor", "delineador"]
+        )
+        is_skincare_treatment = (
+            "skincare" in raw_func_cat or "treatment" in raw_func_cat or "cuidado" in raw_func_cat or
+            (is_facial_focus and any(w in ctx_str for w in ["cuidado", "tratamiento", "rutina", "limpieza", "cutis", "serum", "suero", "crema", "hidrat", "arruga", "antiarrug", "grasa", "mixta", "sebo", "poros", "acne", "acné"])) or
+            any(w in ctx_str for w in ["piel mixta", "piel grasa", "piel seca", "cuidado facial", "tratamiento facial", "rutina facial", "cuidado de la piel"])
+        ) and not has_explicit_makeup_in_query
+
+        is_pure_fragrance = (
+            "fragrance" in raw_func_cat or "perfum" in raw_func_cat or is_fragrance_focus
+        ) and not any(w in ctx_str for w in ["desodorante", "roll on", "roll-on", "jabon", "jabón", "higiene"])
 
         preferred_brands = [str(b).strip().lower() for b in spec.get("preferred_brands") or []]
         excluded_brands = [str(b).strip().lower() for b in spec.get("excluded_brands") or []]
@@ -548,13 +612,12 @@ def create_rerank_and_filter_candidates_tool():
         }
         query_tokens = [w for w in re.findall(r"\b\w{3,}\b", ctx_str) if w not in stop_words]
 
-        filtered = []
+        eligible_candidates = []
         for p in items:
             sku = str(p.get("sku") or p.get("default_code") or "").strip()
             name = str(p.get("name") or "").lower()
             desc = str(p.get("description") or p.get("description_sale") or "").lower()
             p_brand = str(p.get("marca") or "").strip().lower()
-            p_price = p.get("price")
             p_text = f"{name} {desc}"
 
             # A. Exclusión de SKUs explícitos
@@ -571,15 +634,35 @@ def create_rerank_and_filter_candidates_tool():
             if excluded_profiles and any(ep in p_text for ep in excluded_profiles if ep):
                 continue
 
-            # D. Gatekeeper anatómico genérico: Si es foco facial, descartar cremas corporales, de manos y capilares
+            # D. Gatekeeper anatómico genérico: Si es foco facial, descartar cremas corporales, de manos, capilares y desodorantes
             if is_facial_focus:
                 if any(w in p_text for w in [
                     "crema corporal", "loción corporal", "locion corporal", "para el cuerpo",
                     "hidratante corporal", "manos y cuerpo", "crema de manos", "para manos",
-                    "manos resecas", "moldeadora de rizos", "shampoo", "acondicionador"
+                    "manos resecas", "moldeadora de rizos", "shampoo", "acondicionador",
+                    "desodorante", "roll on", "roll-on", "antitranspirante", "axilas"
                 ]):
                     if not any(fw in name for fw in ["facial", "rostro", "cutis", "antiarrugas"]):
                         continue
+                # Descartar productos de bebés/infantiles para rostro si el usuario es adulto
+                if is_adult and any(kd in p_text for kd in concept_kids_descriptors):
+                    continue
+
+            # D.1. Gatekeeper Funcional: Skincare / Cuidado Facial vs Maquillaje e Higiene
+            if is_skincare_treatment:
+                if any(mw in name for mw in [
+                    "base líquida", "base liquida", "base en polvo", "polvo compacto", "polvos compactos",
+                    "full powder", "corrector", "primer", "labial", "máscara de pestañas", "mascara de pestañas",
+                    "rubor", "delineador", "sombras", "desodorante", "roll on", "roll-on", "antitranspirante"
+                ]):
+                    continue
+
+            # D.2. Gatekeeper Funcional: Fragancias vs Higiene Personal (desodorantes, jabones)
+            if is_pure_fragrance:
+                if any(hw in name for hw in [
+                    "desodorante", "roll on", "roll-on", "antitranspirante", "jabón en barra", "jabon en barra", "jabón", "jabon"
+                ]):
+                    continue
 
             # E. Gatekeeper de género
             if target_gender == "female":
@@ -599,19 +682,27 @@ def create_rerank_and_filter_candidates_tool():
                     if any(jd in p_text for jd in concept_teen_descriptors):
                         continue
 
-            # G. Límite de precio si fue detectado explícitamente
-            if max_price_limit is not None and p_price is not None:
+            eligible_candidates.append(p)
+
+        # G. Manejo de presupuesto sobre candidatos aptos de categoría y demografía
+        filtered = []
+        if max_price_limit is not None:
+            for p in eligible_candidates:
+                p_price = p.get("price")
                 try:
-                    if float(p_price) > max_price_limit:
-                        continue
+                    if p_price is not None and float(p_price) <= max_price_limit:
+                        filtered.append(p)
                 except (ValueError, TypeError):
                     pass
 
-            filtered.append(p)
-
-        # Si el filtro fue demasiado estricto y vació todo, recuperar items originales como respaldo
-        if not filtered and items:
-            filtered = list(items)
+            # Si todos los candidatos aptos superan el presupuesto (ej: la fragancia más barata es S/ 65 y el tope era S/ 50),
+            # preservar los candidatos aptos marcando budget_exceeded=True para explicación consultiva del sintetizador.
+            if not filtered and eligible_candidates:
+                for p in eligible_candidates:
+                    p["budget_exceeded"] = True
+                filtered = list(eligible_candidates)
+        else:
+            filtered = list(eligible_candidates)
 
         # 2. Scoring y Reordenamiento Dinámico
         def calculate_item_score(item: Dict[str, Any]) -> float:
@@ -621,12 +712,22 @@ def create_rerank_and_filter_candidates_tool():
             desc = str(item.get("description") or "").lower()
             combined = f"{name} {desc}"
 
-            # Sensibilidad a precio
+            # Bono de verificación contra la fuente única de verdad (product_catalog_embedding) y coincidencia multimodal
+            if item.get("catalog_verified"):
+                score += 18.0
+            if item.get("multimodal_hit"):
+                score += 12.0
+            if item.get("healed_from_sku"):
+                score += 8.0
+
+            # Sensibilidad a precio y ofertas del catálogo
             if p_price is not None:
                 try:
                     val = float(p_price)
                     if is_economy_focus:
                         score += max(0.0, (150.0 - val))
+                        if item.get("discount_tag") or item.get("normal_price"):
+                            score += 12.0
                     else:
                         score += 10.0
                 except (ValueError, TypeError):
@@ -653,6 +754,13 @@ def create_rerank_and_filter_candidates_tool():
             if any(w in ctx_str for w in ["mixta", "grasa", "sebo", "brillo", "matificante"]):
                 if any(w in combined for w in ["matificante", "control de grasa", "sin brillo", "ligera", "oil control"]):
                     score += 20.0
+
+            # Priorizar productos principales (ej. Base Líquida / Base Antiedad / Base en Polvo) sobre accesorios (brochas/esponjas)
+            if "base" in ctx_str and not any(w in ctx_str for w in ["brocha", "esponja", "aplicador"]):
+                if any(w in name for w in ["base líquida", "base liquida", "base antiedad", "base en polvo", "base matte", "colorfix base"]):
+                    score += 35.0
+                elif any(w in name for w in ["brocha", "esponja"]):
+                    score -= 25.0
 
             # Penalización si no tiene precio asignado
             if p_price is None:

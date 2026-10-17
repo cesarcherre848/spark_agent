@@ -65,7 +65,22 @@ class VendorCatalogResolver:
 
         pool = await self._ensure_pool()
         query = """
-            WITH edicion_vendor_stats AS (
+            WITH catalog_pdf_tags AS (
+                SELECT
+                    pc.partner_id AS vendor_id,
+                    max(TRIM(BOTH '"' FROM COALESCE(t.name->>'es_ES', t.name->>'es_PE', t.name->>'en_US', t.name::text)))
+                        FILTER (WHERE TRIM(BOTH '"' FROM COALESCE(t.name->>'es_ES', t.name->>'es_PE', t.name->>'en_US', t.name::text)) ~* '^(yanbal|ésika|esika|belcorp|cyzone|l''bel|lbel)') AS vendor_marca,
+                    max(TRIM(BOTH '"' FROM COALESCE(t.name->>'es_ES', t.name->>'es_PE', t.name->>'en_US', t.name::text)))
+                        FILTER (WHERE TRIM(BOTH '"' FROM COALESCE(t.name->>'es_ES', t.name->>'es_PE', t.name->>'en_US', t.name::text)) ~* '^c-?[0-9]+') AS edicion,
+                    COALESCE(pc.indexed_pages, pc.page_count, 0) AS product_count,
+                    COALESCE(pc.date_start, pc.write_date, pc.create_date) AS last_catalog_update
+                FROM product_catalog pc
+                JOIN product_catalog_product_tag_rel rel ON rel.catalog_id = pc.id
+                JOIN product_tag t ON t.id = rel.tag_id
+                WHERE pc.active = TRUE
+                GROUP BY pc.id, pc.partner_id, pc.indexed_pages, pc.page_count, pc.date_start, pc.write_date, pc.create_date
+            ),
+            edicion_vendor_stats AS (
                 SELECT 
                     vuap.vendor_id,
                     COALESCE(vuap.marca, rp.name) as vendor_marca,
@@ -78,19 +93,31 @@ class VendorCatalogResolver:
                 LEFT JOIN res_partner rp ON rp.id = vuap.vendor_id
                 WHERE vuap.edicion IS NOT NULL
                 GROUP BY vuap.vendor_id, COALESCE(vuap.marca, rp.name), vuap.edicion
+                UNION ALL
+                SELECT
+                    vendor_id,
+                    COALESCE(vendor_marca, 'Yanbal') AS vendor_marca,
+                    edicion,
+                    product_count,
+                    last_catalog_update
+                FROM catalog_pdf_tags
+                WHERE edicion IS NOT NULL
             ),
             ranked_editions AS (
                 SELECT 
                     vendor_id,
                     vendor_marca,
                     edicion,
-                    product_count,
-                    last_catalog_update,
+                    max(product_count) AS product_count,
+                    max(last_catalog_update) AS last_catalog_update,
                     ROW_NUMBER() OVER (
                         PARTITION BY vendor_id 
-                        ORDER BY last_catalog_update DESC
+                        ORDER BY
+                            COALESCE(NULLIF(regexp_replace(edicion, '[^0-9]', '', 'g'), '')::integer, 0) DESC,
+                            max(last_catalog_update) DESC
                     ) as rank_recency
                 FROM edicion_vendor_stats
+                GROUP BY vendor_id, vendor_marca, edicion
             )
             SELECT vendor_id, vendor_marca, edicion, product_count, last_catalog_update
             FROM ranked_editions

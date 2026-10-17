@@ -151,4 +151,36 @@ class UniversalProductHierarchyResolver:
                 )
                 families_map[family_key].variants.append(variant)
 
+            # Incluir también las variantes/tonos descubiertos en la misma página de product_catalog_embedding
+            cat_vars = p.get("catalog_variants")
+            if isinstance(cat_vars, list) and len(cat_vars) > 1:
+                for cv in cat_vars[:10]:
+                    if not isinstance(cv, dict) or not cv.get("sku"):
+                        continue
+                    cv_sku = str(cv["sku"]).strip()
+                    if not cv_sku or cv_sku in seen_skus:
+                        continue
+                    cv_lbl = str(cv.get("label") or "").strip()
+                    # Omitir accesorios/brochas de precio distinto en la misma página si no pertenecen a la misma familia de precio
+                    cv_offer = cv.get("offer_price")
+                    if price is not None and cv_offer is not None and abs(float(price) - float(cv_offer)) > 15.0:
+                        continue
+                    seen_skus.add(cv_sku)
+                    cv_name = f"{base_name} - {cv_lbl}" if cv_lbl and cv_lbl.lower() not in base_name.lower() else base_name
+                    families_map[family_key].variants.append(
+                        ProductVariantView(
+                            product_id=0,
+                            sku=cv_sku,
+                            name=cv_name,
+                            price=float(cv_offer if cv_offer is not None else (price or 0.0)) if (cv_offer is not None or price is not None) else None,
+                            currency=currency,
+                            attribute_details=f"Tono/Variante: {cv_lbl}" if cv_lbl else attr_detail,
+                            pagina=pagina,
+                            edicion=edicion,
+                            marca=marca,
+                            vendor_name=vendor,
+                        )
+                    )
+
         return list(families_map.values())
+
